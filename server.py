@@ -530,6 +530,115 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
         html_str = html_bytes.decode('utf-8')
         server_cfg_json = json.dumps(db.get("storeConfig", {}), ensure_ascii=False)
         sync_script = f"""
+<!-- DGPRO MOBILE RESPONSIVE & ANTI-OVERFLOW ENGINE -->
+<style id="dgpro-mobile-responsive-fix">
+  html, body {{
+    max-width: 100vw !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }}
+  main, header, footer {{
+    max-width: 100vw !important;
+    box-sizing: border-box !important;
+  }}
+  @media (max-width: 639px) {{
+    header {{
+      height: auto !important;
+      overflow: hidden !important;
+      width: 100% !important;
+    }}
+    header > div {{
+      height: auto !important;
+      min-height: 3.5rem !important;
+      padding: 0.65rem 0.75rem !important;
+      flex-wrap: wrap !important;
+      gap: 0.5rem !important;
+      width: 100% !important;
+      box-sizing: border-box !important;
+    }}
+    #brandLogo {{
+      max-width: 100% !important;
+    }}
+    header > div > div:last-child {{
+      width: 100% !important;
+      display: flex !important;
+      align-items: center !important;
+      justify-content: space-between !important;
+      gap: 0.35rem !important;
+      flex-wrap: nowrap !important;
+      overflow-x: auto !important;
+    }}
+    header button {{
+      padding: 0.38rem 0.55rem !important;
+      font-size: 11px !important;
+      line-height: 1.2 !important;
+      white-space: nowrap !important;
+      flex-shrink: 0 !important;
+    }}
+    #dynamicPromoBannersGrid > div {{
+      width: 100% !important;
+      max-width: 100% !important;
+      overflow: hidden !important;
+      box-sizing: border-box !important;
+      padding: 1rem !important;
+    }}
+    #dynamicPromoBannersGrid > div > div {{
+      width: 100% !important;
+      max-width: 100% !important;
+      min-width: 0 !important;
+    }}
+    #promoBanner1Title, #promoBanner2Title {{
+      white-space: normal !important;
+      overflow: visible !important;
+      text-overflow: clip !important;
+      overflow-wrap: break-word !important;
+      word-break: break-word !important;
+      font-size: 0.95rem !important;
+      line-height: 1.35 !important;
+    }}
+    #promoBanner1Desc, #promoBanner2Desc {{
+      white-space: normal !important;
+      overflow-wrap: break-word !important;
+      word-break: break-word !important;
+    }}
+    #heroBannerCarousel {{
+      width: 100% !important;
+      max-width: 100% !important;
+      overflow: hidden !important;
+    }}
+    #heroSlidesTrack > div {{
+      padding: 1.25rem 1.15rem 2.85rem 1.15rem !important;
+      box-sizing: border-box !important;
+      max-width: 100% !important;
+    }}
+    #heroSlidesTrack h1, #heroSlidesTrack h2 {{
+      font-size: 1.35rem !important;
+      line-height: 1.25 !important;
+      overflow-wrap: break-word !important;
+      word-break: break-word !important;
+    }}
+    #heroBannerCarousel button[onclick*="HeroSlide"] {{
+      top: auto !important;
+      bottom: 0.45rem !important;
+      transform: none !important;
+      width: 1.75rem !important;
+      height: 1.75rem !important;
+      font-size: 0.85rem !important;
+    }}
+    #filterPills {{
+      max-width: 100% !important;
+      overflow-x: auto !important;
+      padding-bottom: 0.35rem !important;
+    }}
+    #productDetailsSection > div:first-child {{
+      flex-wrap: wrap !important;
+      gap: 0.5rem !important;
+    }}
+  }}
+</style>
+
 <!-- DGPRO LIVE CLOUD & INSTANT 0MS VIDEO ENGINE -->
 <script id="dgpro-central-cloud-sync">
 (function() {{
