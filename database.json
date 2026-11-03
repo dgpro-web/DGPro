@@ -1,0 +1,42 @@
+{
+  "orders": [],
+  "customers": [
+    {
+      "name": "Raj",
+      "email": "hghgj@jghj",
+      "mobile": "+918299593204",
+      "signupDate": "02/11/2026",
+      "accountType": "Buyer"
+    }
+  ],
+  "sellers": [],
+  "downloadTokens": {},
+  "adminSessions": {
+    "57f2d9deac2310a2e97b88050684efbca22af7e25fc0b16160a5d9c4c8a36c1a": {
+      "username": "admin",
+      "createdAt": 1793530939.5360355,
+      "expiresAt": 1793617339.5360355
+    },
+    "5b6a05e88cf9e6b1e4164a8ef68429c0695011a031b2cd74479806f729c1c963": {
+      "username": "admin",
+      "createdAt": 1793537071.6646323,
+      "expiresAt": 1793623471.6646323
+    },
+    "3d961b607822b487ead0a5aa41e651ddb2b8310ecb7b5886fa7950ff25ef443d": {
+      "username": "admin",
+      "createdAt": 1793563285.9283698,
+      "expiresAt": 1793649685.9283698
+    },
+    "82788e5acbacab31553e9247a5f40e48d995aa1379db61de1d657db52cd15ef5": {
+      "username": "admin",
+      "createdAt": 1793566257.1687758,
+      "expiresAt": 1793652657.1687758
+    }
+  },
+  "adminCredentials": {
+    "username": "admin",
+    "passwordHash": "8957d31b893a136c06f35129e9f0c5bf6ab8479929926d8f4f552ffe4f819a98",
+    "pinHash": "ef76c75232e68c9618b17e3ea292def3c51d834543d289f6ff10a608731341c2",
+    "recoveryKey": "DGPRO-ADMIN-MASTER-RECOVERY"
+  }
+}
