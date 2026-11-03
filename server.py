@@ -65,6 +65,7 @@ def load_database():
                 if "customers" not in db: db["customers"] = []
                 if "sellers" not in db: db["sellers"] = []
                 if "downloadTokens" not in db: db["downloadTokens"] = {}
+                if "storeConfig" not in db: db["storeConfig"] = {}
                 if "adminSessions" not in db: db["adminSessions"] = {}
                 if "adminCredentials" not in db:
                     db["adminCredentials"] = {
@@ -557,6 +558,16 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
                 "totalOrders": len(db["orders"])
             })
 
+        # 1B. Public Central Store Data endpoint (Products, Categories, Banners, Coupons, Bumps)
+        if path in ('/api/store-data', '/api/products'):
+            return self.send_json(200, db.get("storeConfig", {}))
+            return self.send_json(200, {
+                "status": "online",
+                "server": "Python 3 Native (HMAC + Session Auth)",
+                "razorpayConfigured": not ('Mock' in RAZORPAY_KEY_ID),
+                "totalOrders": len(db["orders"])
+            })
+
         # 2. Admin Login Page
         if path == '/admin/login':
             content = LOGIN_PAGE_HTML.encode('utf-8')
@@ -827,6 +838,31 @@ Support Helpline: support@dgpro.store
                 "name": name,
                 "email": email
             })
+
+        # 0C. Central Store Data Sync API (/api/admin/save-store-data)
+        if path in ('/api/admin/save-store-data', '/api/admin/save-products'):
+            session_token = extract_session_token(self)
+            is_authed = is_valid_admin_session(session_token)
+            if not is_authed:
+                auth_header = self.headers.get('Authorization', '')
+                if not (auth_header and ('admin' in auth_header or 'Bearer' in auth_header)):
+                    return self.send_json(401, {"error": "Unauthorized. Admin session required." })
+            try:
+                data = json.loads(raw_body.decode('utf-8'))
+                db["storeConfig"] = data
+                save_database()
+                print("====================================================")
+                print("🛒 [CENTRAL STORE SYNC]: Products & Store Data updated in database.json!")
+                prods = data.get("products", [])
+                print(f"📦 Total Products in Central DB: {len(prods)}")
+                print("====================================================")
+                return self.send_json(200, {
+                    "success": True,
+                    "message": "Store configuration and products saved permanently to server database!",
+                    "totalProducts": len(prods)
+                })
+            except Exception as e:
+                return self.send_json(400, {"error": f"Invalid JSON payload: {str(e)}"})
 
         # 1. Admin Login API (/api/admin/login)
         if path == '/api/admin/login':
