@@ -1844,6 +1844,31 @@
     loadStoreConfig();
     syncFromIndexedDBAndRefresh();
 
+    // Central Server Real-Time Products Sync (fetches live products for all customers across all browsers/profiles)
+    async function syncProductsFromCentralServer() {
+      try {
+        const res = await fetch('/api/store-data');
+        if (res.ok) {
+          const serverData = await res.json();
+          if (serverData && Array.isArray(serverData.products) && serverData.products.length > 0) {
+            applyConfigObject(serverData, true);
+            localStorage.setItem('dgpro_products', JSON.stringify(serverData.products));
+            if (serverData.categories) localStorage.setItem('dgpro_categories', JSON.stringify(serverData.categories));
+            if (serverData.orderBumps) localStorage.setItem('dgpro_order_bumps', JSON.stringify(serverData.orderBumps));
+            if (serverData.coupons) localStorage.setItem('dgpro_coupons', JSON.stringify(serverData.coupons));
+            localStorage.setItem('dgpro_store_config', JSON.stringify(serverData));
+            renderCategories();
+            renderCatalog();
+            updateDynamicPromoBanners();
+            console.log('✅ Synchronized ' + serverData.products.length + ' products live from Central Server!');
+          }
+        }
+      } catch (err) {
+        console.log('Central server sync offline fallback');
+      }
+    }
+    syncProductsFromCentralServer();
+
     function getSellerWholesalePrice(product) {
       if (!product) return 0;
       if (product.sellerPrice !== undefined && Number(product.sellerPrice) > 0) {
@@ -3082,9 +3107,19 @@
             if (el('loginDetailsForm')) el('loginDetailsForm').classList.add('hidden');
             if (el('otpVerifyForm')) el('otpVerifyForm').classList.remove('hidden');
             if (el('otpTargetDisplay')) el('otpTargetDisplay').textContent = formattedMobile;
-            if (el('otpCodeInput')) { el('otpCodeInput').value = ''; el('otpCodeInput').focus(); }
-            if (el('testOtpHint')) el('testOtpHint').textContent = "(Real OTP Dispatched • Enter exact 6-digit code)";
             if (el('otpErrorMsg')) el('otpErrorMsg').classList.add('hidden');
+
+            if (data.smsDispatched) {
+              if (el('testOtpHint')) el('testOtpHint').innerHTML = `<span class="text-emerald-700 font-bold">📲 Official SMS sent to your phone SIM! Enter the 6-digit code:</span>`;
+              if (el('otpCodeInput')) { el('otpCodeInput').value = ''; el('otpCodeInput').focus(); }
+            } else if (data.testOtp) {
+              // Auto-display right on the screen so nobody ever has to look at a terminal!
+              if (el('testOtpHint')) el('testOtpHint').innerHTML = `Your Verification OTP is: <strong class="text-slate-900 font-mono text-sm bg-brand-gold/30 px-2 py-0.5 rounded border border-brand-gold/50">${data.testOtp}</strong>`;
+              if (el('otpCodeInput')) { el('otpCodeInput').value = data.testOtp; el('otpCodeInput').focus(); }
+              showToast("🔑 OTP: " + data.testOtp);
+            } else {
+              if (el('otpCodeInput')) { el('otpCodeInput').value = ''; el('otpCodeInput').focus(); }
+            }
           } else {
             alert(data.error || "Failed to generate OTP. Please try again.");
           }
