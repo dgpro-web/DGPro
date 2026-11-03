@@ -1720,6 +1720,20 @@
     }
     loadAdminStore();
 
+    // Fetch latest store config from central server if on a new browser/device
+    try {
+      fetch('/api/store-data')
+        .then(r => r.json())
+        .then(serverCfg => {
+          if (serverCfg && Array.isArray(serverCfg.products) && serverCfg.products.length > 0) {
+            applyParsedConfig(serverCfg);
+            renderDashboard();
+            renderProductsTable();
+            renderCategories();
+          }
+        }).catch(e => {});
+    } catch(e) {}
+
     loadFromIndexedDB('dgpro_store_config').then(async idbConfig => {
       if (idbConfig) {
         applyParsedConfig(idbConfig);
@@ -1869,6 +1883,18 @@
           lastUpdated: STORE_CONFIG.lastUpdated
         };
         localStorage.setItem('dgpro_store_config', JSON.stringify(lightCopy));
+        // Sync to Central Backend Server (so all devices and customers see it)
+        try {
+          fetch('/api/admin/save-store-data', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(lightCopy)
+          }).then(r => r.json()).then(res => {
+            if (res && res.success) {
+              console.log('✅ Central Server Database Synced with latest products!');
+            }
+          }).catch(err => console.warn('Server sync warning:', err));
+        } catch(syncErr) {}
       } catch(e) {}
     }
 
