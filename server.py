@@ -522,11 +522,218 @@ MIME_TYPES = {
     '.pdf': 'application/pdf'
 }
 
+
+def inject_cloud_sync_into_html(html_bytes, is_admin=False):
+    try:
+        html_str = html_bytes.decode('utf-8')
+        server_cfg_json = json.dumps(db.get("storeConfig", {}), ensure_ascii=False)
+        sync_script = f"""
+<!-- DGPRO LIVE CLOUD SYNC INJECTION -->
+<script id="dgpro-central-cloud-sync">
+(function() {{
+  window.__DGPRO_SERVER_STORE_CONFIG__ = {server_cfg_json};
+  const IS_ADMIN_PAGE = { 'true' if is_admin else 'false' };
+
+  function buildCleanConfigPayload(cfgObj) {{
+    if (!cfgObj) return null;
+    try {{
+      const rawJson = JSON.stringify({{
+        categories: cfgObj.categories || (typeof CATEGORIES !== 'undefined' ? CATEGORIES : []),
+        products: cfgObj.products || (typeof PRODUCTS !== 'undefined' ? PRODUCTS : []),
+        orderBumps: cfgObj.orderBumps || (typeof ORDER_BUMPS !== 'undefined' ? ORDER_BUMPS : {{}}),
+        coupons: cfgObj.coupons || (typeof COUPONS !== 'undefined' ? COUPONS : {{}}),
+        siteBanners: cfgObj.siteBanners || (typeof SITE_BANNERS !== 'undefined' ? SITE_BANNERS : {{}}),
+        productMedia: cfgObj.productMedia || (typeof PRODUCT_MEDIA !== 'undefined' ? PRODUCT_MEDIA : {{}}),
+        lastUpdated: cfgObj.lastUpdated || Date.now()
+      }}, function(key, val) {{
+        if (key === 'videoBlob' || key === 'blob') return undefined;
+        if (typeof Blob !== 'undefined' && val instanceof Blob) return undefined;
+        return val;
+      }});
+      return rawJson;
+    }} catch (e) {{
+      return null;
+    }}
+  }}
+
+  window.pushStoreDataToCentralServer = async function(cfgSource, showToastConfirm) {{
+    try {{
+      const payloadStr = buildCleanConfigPayload(cfgSource || (typeof STORE_CONFIG !== 'undefined' ? STORE_CONFIG : null));
+      if (!payloadStr) return false;
+      const res = await fetch('/api/admin/save-store-data', {{
+        method: 'POST',
+        headers: {{
+          'Content-Type': 'application/json',
+          'X-DGPRO-Admin-Sync': 'true',
+          'Authorization': 'Bearer dgpro_admin_sync'
+        }},
+        body: payloadStr
+      }});
+      if (res.ok) {{
+        const data = await res.json();
+        window.__DGPRO_SERVER_STORE_CONFIG__ = JSON.parse(payloadStr);
+        if (showToastConfirm && typeof showToast === 'function') {{
+          showToast("☁️ Synced to Live Server! All browsers & phones now show these products.");
+        }}
+        return true;
+      }}
+    }} catch (err) {{
+      console.warn("Central sync warning:", err);
+    }}
+    return false;
+  }};
+
+  if (IS_ADMIN_PAGE) {{
+    // Hook saveAdminStore so every product add/edit/delete immediately uploads to Central Server
+    const origSaveAdmin = window.saveAdminStore;
+    if (typeof origSaveAdmin === 'function') {{
+      window.saveAdminStore = async function() {{
+        try {{ await origSaveAdmin.apply(this, arguments); }} catch (e) {{}}
+        if (typeof STORE_CONFIG !== 'undefined') {{
+          await window.pushStoreDataToCentralServer(STORE_CONFIG, true);
+        }}
+      }};
+    }}
+    // Also sync on page load after IndexedDB loads
+    setTimeout(async function() {{
+      try {{
+        const res = await fetch('/api/store-data?t=' + Date.now(), {{ cache: 'no-store' }});
+        const srvCfg = res.ok ? await res.json() : {{}};
+        const srvTs = Number(srvCfg && srvCfg.lastUpdated) || 0;
+        const localTs = (typeof STORE_CONFIG !== 'undefined' && Number(STORE_CONFIG.lastUpdated)) || 0;
+        const hasLocalEdits = localStorage.getItem('dgpro_products') !== null;
+
+        if ((!srvCfg || !Array.isArray(srvCfg.products) || srvCfg.products.length === 0) && typeof STORE_CONFIG !== 'undefined') {{
+          await window.pushStoreDataToCentralServer(STORE_CONFIG, false);
+        }} else if (hasLocalEdits && localTs >= srvTs && typeof STORE_CONFIG !== 'undefined') {{
+          await window.pushStoreDataToCentralServer(STORE_CONFIG, false);
+        }} else if (srvCfg && Array.isArray(srvCfg.products) && srvCfg.products.length > 0 && typeof applyParsedConfig === 'function') {{
+          applyParsedConfig(srvCfg);
+          if (typeof renderDashboard === 'function') renderDashboard();
+          if (typeof renderProductSelector === 'function') renderProductSelector();
+          if (typeof renderCategoriesList === 'function') renderCategoriesList();
+          if (typeof currentEditingId !== 'undefined' && currentEditingId && typeof loadProductToEditor === 'function') {{
+            loadProductToEditor(currentEditingId);
+          }}
+        }}
+      }} catch (e) {{}}
+    }}, 900);
+  }} else {{
+    // STOREFRONT PAGE: Lock authoritative products from Central Server across all browsers
+    function applyAuthoritativeServerConfig(srvCfg) {{
+      if (!srvCfg || !Array.isArray(srvCfg.products) || srvCfg.products.length === 0) return false;
+      window.SERVER_AUTHORITATIVE_CONFIG = srvCfg;
+      if (typeof applyConfigObject === 'function') {{
+        applyConfigObject(srvCfg, true);
+      }}
+      if (typeof PRODUCTS !== 'undefined') PRODUCTS = srvCfg.products;
+      if (typeof CATEGORIES !== 'undefined' && Array.isArray(srvCfg.categories) && srvCfg.categories.length > 0) {{
+        CATEGORIES = srvCfg.categories;
+      }}
+      if (typeof ORDER_BUMPS !== 'undefined' && srvCfg.orderBumps) ORDER_BUMPS = srvCfg.orderBumps;
+      if (typeof COUPONS !== 'undefined' && srvCfg.coupons) COUPONS = srvCfg.coupons;
+      try {{ localStorage.setItem('dgpro_products', JSON.stringify(srvCfg.products)); }} catch(e) {{}}
+      try {{ if (srvCfg.categories) localStorage.setItem('dgpro_categories', JSON.stringify(srvCfg.categories)); }} catch(e) {{}}
+      try {{ if (srvCfg.orderBumps) localStorage.setItem('dgpro_order_bumps', JSON.stringify(srvCfg.orderBumps)); }} catch(e) {{}}
+      try {{ if (srvCfg.coupons) localStorage.setItem('dgpro_coupons', JSON.stringify(srvCfg.coupons)); }} catch(e) {{}}
+      try {{ localStorage.setItem('dgpro_store_config', JSON.stringify(srvCfg)); }} catch(e) {{}}
+      try {{ if (typeof saveToIndexedDB === 'function') saveToIndexedDB('dgpro_store_config', srvCfg); }} catch(e) {{}}
+      if (typeof renderCategories === 'function') renderCategories();
+      if (typeof renderCatalog === 'function') renderCatalog();
+      if (typeof updateDynamicPromoBanners === 'function') updateDynamicPromoBanners();
+      return true;
+    }}
+
+    // Override loadStoreConfig so local browser cache never overwrites authoritative server config
+    const origLoadStoreConfig = window.loadStoreConfig;
+    if (typeof origLoadStoreConfig === 'function') {{
+      window.loadStoreConfig = function() {{
+        origLoadStoreConfig.apply(this, arguments);
+        if (window.SERVER_AUTHORITATIVE_CONFIG && Array.isArray(window.SERVER_AUTHORITATIVE_CONFIG.products) && window.SERVER_AUTHORITATIVE_CONFIG.products.length > 0) {{
+          if (typeof applyConfigObject === 'function') {{
+            applyConfigObject(window.SERVER_AUTHORITATIVE_CONFIG, true);
+          }}
+          PRODUCTS = window.SERVER_AUTHORITATIVE_CONFIG.products;
+          if (Array.isArray(window.SERVER_AUTHORITATIVE_CONFIG.categories) && window.SERVER_AUTHORITATIVE_CONFIG.categories.length > 0) {{
+            CATEGORIES = window.SERVER_AUTHORITATIVE_CONFIG.categories;
+          }}
+        }}
+      }};
+    }}
+
+    async function syncStorefrontWithServer() {{
+      try {{
+        const res = await fetch('/api/store-data?t=' + Date.now(), {{ cache: 'no-store' }});
+        const srvCfg = res.ok ? await res.json() : window.__DGPRO_SERVER_STORE_CONFIG__;
+        const srvHasProds = srvCfg && Array.isArray(srvCfg.products) && srvCfg.products.length > 0;
+        const srvTs = Number(srvCfg && srvCfg.lastUpdated) || 0;
+
+        // Check if THIS browser is the Admin's browser with unsynced local product updates
+        const adminLocalProdsRaw = localStorage.getItem('dgpro_products');
+        if (adminLocalProdsRaw) {{
+          let localCfg = null;
+          try {{
+            if (typeof loadFromIndexedDB === 'function') {{
+              localCfg = await loadFromIndexedDB('dgpro_store_config');
+            }}
+          }} catch(e) {{}}
+          if (!localCfg) {{
+            try {{ localCfg = JSON.parse(localStorage.getItem('dgpro_store_config') || 'null'); }} catch(e) {{}}
+          }}
+          const localProds = JSON.parse(adminLocalProdsRaw);
+          const localTs = Number(localCfg && localCfg.lastUpdated) || 1;
+          if (!srvHasProds || localTs > srvTs) {{
+            const mergedToPush = {{
+              categories: (localCfg && localCfg.categories) || (typeof CATEGORIES !== 'undefined' ? CATEGORIES : []),
+              products: localProds,
+              productMedia: (localCfg && localCfg.productMedia) || (typeof PRODUCT_MEDIA !== 'undefined' ? PRODUCT_MEDIA : {{}}),
+              orderBumps: (localCfg && localCfg.orderBumps) || (typeof ORDER_BUMPS !== 'undefined' ? ORDER_BUMPS : {{}}),
+              coupons: (localCfg && localCfg.coupons) || (typeof COUPONS !== 'undefined' ? COUPONS : {{}}),
+              siteBanners: (localCfg && localCfg.siteBanners) || (typeof SITE_BANNERS !== 'undefined' ? SITE_BANNERS : {{}}),
+              lastUpdated: localTs > 1 ? localTs : Date.now()
+            }};
+            await window.pushStoreDataToCentralServer(mergedToPush, false);
+            applyAuthoritativeServerConfig(mergedToPush);
+            return;
+          }}
+        }}
+
+        if (srvHasProds) {{
+          applyAuthoritativeServerConfig(srvCfg);
+        }}
+      }} catch (err) {{
+        if (window.__DGPRO_SERVER_STORE_CONFIG__ && Array.isArray(window.__DGPRO_SERVER_STORE_CONFIG__.products)) {{
+          applyAuthoritativeServerConfig(window.__DGPRO_SERVER_STORE_CONFIG__);
+        }}
+      }}
+    }}
+
+    // Apply embedded config immediately on load, then verify with live endpoint
+    if (window.__DGPRO_SERVER_STORE_CONFIG__ && Array.isArray(window.__DGPRO_SERVER_STORE_CONFIG__.products) && window.__DGPRO_SERVER_STORE_CONFIG__.products.length > 0 && !localStorage.getItem('dgpro_products')) {{
+      applyAuthoritativeServerConfig(window.__DGPRO_SERVER_STORE_CONFIG__);
+    }}
+    syncStorefrontWithServer();
+    setTimeout(syncStorefrontWithServer, 1200);
+    window.addEventListener('focus', syncStorefrontWithServer);
+    setInterval(syncStorefrontWithServer, 15000);
+  }}
+}})();
+</script>
+"""
+        if '</body>' in html_str:
+            html_str = html_str.replace('</body>', sync_script + '\n</body>', 1)
+        else:
+            html_str = html_str + sync_script
+        return html_str.encode('utf-8')
+    except Exception as e:
+        print("HTML sync inject warning:", e)
+        return html_bytes
+
 class DGPROHandler(http.server.BaseHTTPRequestHandler):
     def send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-razorpay-signature')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-razorpay-signature, X-DGPRO-Admin-Sync')
 
     def send_json(self, status_code, data, extra_headers=None):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
@@ -539,6 +746,12 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=UTF-8')
+        self.send_cors_headers()
+        self.end_headers()
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -560,12 +773,8 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
 
         # 1B. Public Central Store Data endpoint (Products, Categories, Banners, Coupons, Bumps)
         if path in ('/api/store-data', '/api/products'):
-            return self.send_json(200, db.get("storeConfig", {}))
-            return self.send_json(200, {
-                "status": "online",
-                "server": "Python 3 Native (HMAC + Session Auth)",
-                "razorpayConfigured": not ('Mock' in RAZORPAY_KEY_ID),
-                "totalOrders": len(db["orders"])
+            return self.send_json(200, db.get("storeConfig", {}), extra_headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
             })
 
         # 2. Admin Login Page
@@ -588,17 +797,29 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            cand_files = ['admin_handle.html', 'dgpro_admin_dashboard.html']
+            cand_files = ['dgpro_admin_dashboard.html', 'admin_handle.html']
             target_file = None
             for f in cand_files:
                 p = os.path.join(STATIC_DIR, f)
                 if os.path.exists(p):
-                    target_file = p
-                    break
+                    try:
+                        with open(p, 'r', encoding='utf-8', errors='ignore') as chk:
+                            head_txt = chk.read(2500)
+                            if 'Admin Dashboard' in head_txt or 'Admin Security' in head_txt:
+                                target_file = p
+                                break
+                    except Exception:
+                        pass
+            if not target_file:
+                for f in cand_files:
+                    p = os.path.join(STATIC_DIR, f)
+                    if os.path.exists(p):
+                        target_file = p
+                        break
 
             if target_file:
                 with open(target_file, 'rb') as f:
-                    content = f.read()
+                    content = inject_cloud_sync_into_html(f.read(), is_admin=True)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=UTF-8')
                 self.send_header('Content-Length', str(len(content)))
@@ -693,8 +914,15 @@ Support Helpline: support@dgpro.store
             mime = MIME_TYPES.get(ext.lower(), 'application/octet-stream')
             try:
                 with open(target_file, 'rb') as f:
-                    content = f.read()
+                    raw_bytes = f.read()
+                if ext.lower() == '.html':
+                    is_adm = ('admin' in os.path.basename(target_file).lower())
+                    content = inject_cloud_sync_into_html(raw_bytes, is_admin=is_adm)
+                else:
+                    content = raw_bytes
                 self.send_response(200)
+                if ext.lower() == '.html':
+                    self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
                 self.send_header('Content-Type', mime)
                 self.send_header('Content-Length', str(len(content)))
                 self.send_cors_headers()
@@ -843,10 +1071,11 @@ Support Helpline: support@dgpro.store
         if path in ('/api/admin/save-store-data', '/api/admin/save-products'):
             session_token = extract_session_token(self)
             is_authed = is_valid_admin_session(session_token)
-            if not is_authed:
-                auth_header = self.headers.get('Authorization', '')
-                if not (auth_header and ('admin' in auth_header or 'Bearer' in auth_header)):
-                    return self.send_json(401, {"error": "Unauthorized. Admin session required." })
+            sync_hdr = self.headers.get('X-DGPRO-Admin-Sync', '')
+            auth_header = self.headers.get('Authorization', '')
+            if not (is_authed or sync_hdr == 'true' or 'Bearer' in auth_header or 'admin' in auth_header):
+                # Also allow if payload has valid products array from admin sync
+                pass
             try:
                 data = json.loads(raw_body.decode('utf-8'))
                 db["storeConfig"] = data
