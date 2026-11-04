@@ -13,6 +13,8 @@ Features:
 import http.server
 import socketserver
 import urllib.parse
+import urllib.request
+import urllib.error
 import json
 import hmac
 import hashlib
