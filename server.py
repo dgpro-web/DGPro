@@ -19,11 +19,28 @@ import hashlib
 import os
 import time
 import secrets
+import base64
+
+# Lightweight .env loader (loads environment variables from .env if present)
+_env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+if os.path.exists(_env_file):
+    try:
+        with open(_env_file, 'r', encoding='utf-8') as _ef:
+            for _line in _ef:
+                _line = _line.strip()
+                if _line and not _line.startswith('#') and '=' in _line:
+                    _k, _v = _line.split('=', 1)
+                    _k = _k.strip()
+                    _v = _v.strip().strip('"').strip("'")
+                    if _k and _k not in os.environ:
+                        os.environ[_k] = _v
+    except Exception as _env_err:
+        print("Notice: Error reading .env file:", _env_err)
 
 PORT = int(os.environ.get('PORT', 5000))
-RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', 'rzp_test_DGPROMockKey123')
-RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', 'dgpro_mock_secret_key_456')
-RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', 'dgpro_webhook_secret_789')
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '').strip()
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '').strip()
+RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '').strip()
 
 # Server-Side Default Admin Credentials
 DEFAULT_ADMIN_USERNAME = 'admin'
@@ -203,7 +220,7 @@ def hash_with_salt(val):
     return hashlib.sha256(payload).hexdigest()
 
 def verify_payment_signature(rzp_order_id, rzp_payment_id, rzp_signature):
-    if not rzp_order_id or not rzp_payment_id or not rzp_signature:
+    if not rzp_order_id or not rzp_payment_id or not rzp_signature or not RAZORPAY_KEY_SECRET:
         return False
     try:
         payload = f"{rzp_order_id}|{rzp_payment_id}".encode('utf-8')
@@ -1940,32 +1957,86 @@ Support Helpline: support@dgpro.store
                 "redirect": "/admin"
             }, extra_headers={"Set-Cookie": cookie_val})
 
-        # 6. Create Order (/api/create-order)
+        # 6. Create Razorpay Order (POST /api/create-order)
         if path == '/api/create-order':
             try:
                 data = json.loads(raw_body.decode('utf-8'))
             except Exception:
                 return self.send_json(400, {"error": "Invalid JSON"})
 
-            items = data.get("items", [])
-            email = data.get("buyerEmail", "").strip().lower()
-            if not items or not email:
-                return self.send_json(400, {"error": "Missing items or buyerEmail"})
+            currency = data.get("currency", "INR")
 
-            total = sum(float(i.get("price", 0)) for i in items)
-            amount_paise = int(round(total * 100))
-            order_id = "ORD-IN-" + str(secrets.randbelow(900000) + 100000)
+            # Support both direct { amount (paise), currency, receipt } and cart { items, buyerEmail }
+            if "amount" in data and not data.get("items"):
+                raw_amt = data.get("amount", 0)
+                amount_paise = int(round(float(raw_amt)))
+                receipt = str(data.get("receipt", "")).strip() or ("ORD-IN-" + str(secrets.randbelow(900000) + 100000))
+                email = data.get("buyerEmail", "customer@dgpro.store").strip().lower()
+                buyer_name = data.get("buyerName", "Customer")
+                buyer_mobile = data.get("buyerMobile", "N/A")
+                items = [{"id": "item_direct", "title": "Direct Payment", "price": amount_paise / 100.0}]
+            else:
+                items = data.get("items", [])
+                email = data.get("buyerEmail", "").strip().lower()
+                if not items or not email:
+                    return self.send_json(400, {"error": "Missing items or buyerEmail"})
+                total = sum(float(i.get("price", 0)) for i in items)
+                amount_paise = int(round(total * 100))
+                receipt = str(data.get("receipt", "")).strip() or ("ORD-IN-" + str(secrets.randbelow(900000) + 100000))
+                buyer_name = data.get("buyerName", "Customer")
+                buyer_mobile = data.get("buyerMobile", "N/A")
+
+            # Validate amount >= 100 paise (Minimum amount: 100 paise = ₹1.00)
+            if amount_paise < 100:
+                return self.send_json(400, {"error": "Amount must be at least 100 paise (₹1.00)"})
+
+            order_id = receipt
             rzp_order_id = "order_" + secrets.token_hex(8)
+
+            # Call official Razorpay API: POST https://api.razorpay.com/v1/orders
+            if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET:
+                try:
+                    auth_str = f"{RAZORPAY_KEY_ID.strip()}:{RAZORPAY_KEY_SECRET.strip()}"
+                    auth_b64 = base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')
+                    rzp_payload = json.dumps({
+                        "amount": amount_paise,
+                        "currency": currency,
+                        "receipt": order_id
+                    }).encode('utf-8')
+                    rzp_req = urllib.request.Request(
+                        "https://api.razorpay.com/v1/orders",
+                        data=rzp_payload,
+                        headers={
+                            "Authorization": f"Basic {auth_b64}",
+                            "Content-Type": "application/json",
+                            "User-Agent": "Mozilla/5.0"
+                        }
+                    )
+                    with urllib.request.urlopen(rzp_req, timeout=12) as rzp_resp:
+                        rzp_data = json.loads(rzp_resp.read().decode('utf-8'))
+                        if rzp_data.get("id"):
+                            rzp_order_id = rzp_data.get("id")
+                            print(f"💳 [RAZORPAY ORDER CREATED]: {rzp_order_id} for receipt {order_id} (₹{amount_paise/100})")
+                except urllib.error.HTTPError as he:
+                    err_body = he.read().decode('utf-8', errors='ignore')
+                    print(f"⚠️ [RAZORPAY API AUTH/HTTP ERROR {he.code}]: {err_body}")
+                    if he.code == 401:
+                        return self.send_json(401, {"error": "Razorpay authentication failed. Invalid API credentials."})
+                    return self.send_json(500, {"error": f"Razorpay API error ({he.code}): {err_body}"})
+                except Exception as e:
+                    print("⚠️ Razorpay API connection error:", e)
+                    return self.send_json(500, {"error": f"Failed to connect to Razorpay API: {str(e)}"})
 
             new_order = {
                 "orderId": order_id,
                 "razorpayOrderId": rzp_order_id,
-                "buyerName": data.get("buyerName", "Customer"),
+                "buyerName": buyer_name,
                 "buyerEmail": email,
-                "buyerMobile": data.get("buyerMobile", "N/A"),
+                "buyerMobile": buyer_mobile,
                 "items": items,
-                "totalAmount": total,
+                "totalAmount": amount_paise / 100.0,
                 "amountInPaise": amount_paise,
+                "currency": currency,
                 "isSellerOrder": bool(data.get("isSeller")),
                 "accountType": "Seller" if data.get("isSeller") else "Buyer",
                 "status": "pending",
@@ -1977,35 +2048,56 @@ Support Helpline: support@dgpro.store
 
             return self.send_json(200, {
                 "success": True,
-                "orderId": order_id,
-                "razorpayOrderId": rzp_order_id,
-                "amount": total,
-                "amountInPaise": amount_paise,
-                "currency": "INR",
+                "order_id": rzp_order_id,          # Razorpay official standard contract
+                "razorpayOrderId": rzp_order_id,   # Project alias
+                "orderId": order_id,               # Store internal receipt
+                "amount": amount_paise,            # Amount in paise
+                "totalAmount": amount_paise / 100.0,
+                "currency": currency,
                 "keyId": RAZORPAY_KEY_ID
             })
 
-        # 7. Verify Payment (/api/verify-payment)
+        # 7. Verify Payment Signature (POST /api/verify-payment)
         if path == '/api/verify-payment':
             try:
                 data = json.loads(raw_body.decode('utf-8'))
             except Exception:
                 return self.send_json(400, {"error": "Invalid JSON"})
 
-            rzp_order_id = data.get("razorpay_order_id", "")
-            rzp_pay_id = data.get("razorpay_payment_id", "")
-            rzp_sig = data.get("razorpay_signature", "")
-            order_id = data.get("orderId", "")
+            rzp_order_id = str(data.get("razorpay_order_id", "")).strip()
+            rzp_pay_id = str(data.get("razorpay_payment_id", "")).strip()
+            rzp_sig = str(data.get("razorpay_signature", "")).strip()
+            order_id = str(data.get("orderId", "")).strip()
 
+            # Validation: Missing required fields -> return 400
+            if not rzp_order_id or not rzp_pay_id or not rzp_sig:
+                return self.send_json(400, {
+                    "success": False,
+                    "error": "Missing required signature fields (razorpay_order_id, razorpay_payment_id, razorpay_signature)"
+                })
+
+            # Verify HMAC-SHA256 signature
             valid_sig = verify_payment_signature(rzp_order_id, rzp_pay_id, rzp_sig)
-            is_mock = "Mock" in RAZORPAY_KEY_ID
-            if not (valid_sig or (is_mock and rzp_pay_id)):
-                return self.send_json(400, {"success": False, "error": "HMAC signature verification failed."})
 
-            matched = next((o for o in db["orders"] if o["orderId"] == order_id or o.get("razorpayOrderId") == rzp_order_id), None)
+            # Signature mismatch: return 400, do NOT mark as paid
+            if not valid_sig:
+                return self.send_json(400, {
+                    "success": False,
+                    "error": "Invalid payment signature. Verification failed."
+                })
+
+            # Match order in db
+            matched = next((o for o in db["orders"] if o.get("orderId") == order_id or o.get("razorpayOrderId") == rzp_order_id), None)
             if not matched:
-                return self.send_json(404, {"success": False, "error": "Order not found in database."})
+                matched = {
+                    "orderId": order_id or ("ORD-" + secrets.token_hex(4)),
+                    "razorpayOrderId": rzp_order_id,
+                    "items": [],
+                    "buyerEmail": "customer@dgpro.store"
+                }
+                db["orders"].insert(0, matched)
 
+            # Mark order as paid
             matched["status"] = "completed"
             matched["paymentStatus"] = "paid"
             matched["razorpayPaymentId"] = rzp_pay_id
