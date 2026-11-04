@@ -3461,11 +3461,24 @@
           finalPurchasedItems.push({ ...applicableBump.targetProduct, price: applicableBump.price, isBumpItem: true });
         }
 
-        const sub = finalPurchasedItems.reduce((s,i)=>s+(i.isBumpItem ? i.price : getEffectivePrice(i)),0);
+        const isSellerActive = Boolean(isSellerSessionVerified());
+        const sub = finalPurchasedItems.reduce((s,i)=>s+(i.isBumpItem ? Number(i.price) : Number(getEffectivePrice(i))), 0);
         const couponEval = evaluateCouponOnItems(appliedCoupon, finalPurchasedItems);
         const disc = couponEval.discount;
         const totalAmount = Math.max(0, sub - disc);
         const selectedMethod = document.querySelector('input[name="payMethod"]:checked')?.value || 'razorpay';
+
+        // Map items with effective price (ensures wholesale price is passed when seller mode is active)
+        const itemsWithEffectivePricing = finalPurchasedItems.map(item => {
+          const effectiveP = item.isBumpItem ? Number(item.price) : Number(getEffectivePrice(item));
+          return {
+            ...item,
+            price: effectiveP,
+            regularPrice: Number(item.price || effectiveP),
+            sellerPrice: Number(getSellerWholesalePrice(item)),
+            isSellerPricing: isSellerActive
+          };
+        });
 
         if (el('checkoutModal')) el('checkoutModal').classList.add('hidden');
 
@@ -3479,9 +3492,9 @@
                 buyerName: name,
                 buyerEmail: email,
                 buyerMobile: mobile,
-                items: finalPurchasedItems,
+                items: itemsWithEffectivePricing,
                 totalAmount: totalAmount,
-                isSeller: Boolean(currentSeller && currentSeller.verified)
+                isSeller: isSellerActive
               })
             })
             .then(r => r.json())
