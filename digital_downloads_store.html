@@ -146,6 +146,8 @@
   <!-- Google Firebase Web SDKs for Free Phone OTP Verification (10,000 Free SMS/mo) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <!-- Razorpay Standard Web Checkout SDK -->
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 </head>
 <body class="bg-brand-cream text-stone-800 min-h-screen flex flex-col">
 
@@ -3515,15 +3517,17 @@
     }
 
     async function openSecureRazorpayGateway(backendBase, orderData, name, email, mobile, finalPurchasedItems, totalAmount, selectedMethod) {
-      if (typeof Razorpay !== 'undefined' && orderData.keyId && !orderData.keyId.includes('Mock')) {
+      if (typeof Razorpay !== 'undefined' && orderData.keyId) {
+        const rzpAmount = orderData.amount || orderData.amountInPaise;
+        const rzpOrderId = orderData.order_id || orderData.razorpayOrderId;
         const options = {
           key: orderData.keyId,
-          amount: orderData.amountInPaise,
-          currency: "INR",
+          amount: rzpAmount,
+          currency: orderData.currency || "INR",
           name: "DGPRO Digital Store",
-          description: `Order ${orderData.orderId}`,
-          order_id: orderData.razorpayOrderId,
-          prefill: { name, email, contact: mobile },
+          description: `Order ${orderData.orderId || rzpOrderId}`,
+          order_id: rzpOrderId,
+          prefill: { name: name, email: email, contact: mobile },
           theme: { color: "#18201e" },
           handler: async function (response) {
             showToast("🔒 Verifying HMAC-SHA256 signature on backend server...");
@@ -3539,18 +3543,28 @@
                 })
               });
               const verifyData = await verifyRes.json();
-              if (verifyData.success) {
+              if (verifyRes.ok && verifyData.success) {
                 showToast("✅ Payment Verified & Confirmed by Backend!");
                 finalizeSuccessfulOrder(response.razorpay_payment_id, name, email, mobile, finalPurchasedItems, totalAmount, verifyData.items);
               } else {
                 showCustomAlert("Security Verification Failed", verifyData.error || "Payment signature mismatch.");
               }
             } catch(e) {
-              showCustomAlert("Verification Error", "Could not verify signature on backend.");
+              showCustomAlert("Verification Error", "Could not verify signature on backend: " + (e && e.message ? e.message : e));
+            }
+          },
+          modal: {
+            ondismiss: function() {
+              console.log("Razorpay checkout modal dismissed by user.");
+              showToast("Payment cancelled by user.");
             }
           }
         };
         const rzp = new Razorpay(options);
+        rzp.on('payment.failed', function (resp) {
+          console.error("Razorpay Payment Failed:", resp.error);
+          showCustomAlert("Payment Failed", (resp.error && (resp.error.description || resp.error.reason)) || "Transaction was declined.");
+        });
         rzp.open();
         return;
       }
