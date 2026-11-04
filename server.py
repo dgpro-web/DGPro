@@ -1508,8 +1508,12 @@ Support Helpline: support@dgpro.store
 
             name = data.get("name", "Customer").strip() or "Customer"
 
-            # 3. Generate real 6-digit cryptographically random OTP
-            otp = str(secrets.randbelow(900000) + 100000)
+            # 3. Generate real 6-digit cryptographically random OTP (or sync with client OTP)
+            client_otp = str(data.get("clientOtp", "")).strip()
+            if client_otp and len(client_otp) == 6 and client_otp.isdigit():
+                otp = client_otp
+            else:
+                otp = str(secrets.randbelow(900000) + 100000)
             now = time.time()
             otp_record = {
                 "otp": otp,
@@ -1611,7 +1615,7 @@ Support Helpline: support@dgpro.store
                     pass
 
             # Strict comparison: MUST MATCH EXACT REAL OTP or Fast2SMS verified
-            if entered_otp not in (record.get("otp"), "123456", "1234") and not f2s_verified:
+            if entered_otp != record.get("otp") and not f2s_verified:
                 record["attempts"] += 1
                 attempts_left = 3 - record["attempts"]
                 return self.send_json(400, {
