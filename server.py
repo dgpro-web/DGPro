@@ -58,7 +58,7 @@ customer_otps = {}  # { mobile: { "otp": "...", "expiresAt": timestamp, "attempt
 FAST2SMS_API_KEY = os.environ.get('FAST2SMS_API_KEY', '3jVi78avL4iWyn5UKp31Y6Dd9Opi5lFyP0htNd8MRNKDVfeK0UfeRfyET3oAmI3MFxRtI7uaa39tAx9N')
 SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', 587))
-SMTP_EMAIL = os.environ.get('SMTP_EMAIL', 'dgproofficial@gmail.com')
+SMTP_EMAIL = os.environ.get('SMTP_EMAIL', 'dgproofficials@gmail.com')
 SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
 
 def dispatch_email_otp(to_email, otp_code, customer_name="Customer", mobile_number=""):
