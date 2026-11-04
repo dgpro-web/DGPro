@@ -56,6 +56,58 @@ failed_login_attempts = {}
 active_recovery_otp = {}
 customer_otps = {}  # { mobile: { "otp": "...", "expiresAt": timestamp, "attempts": 0 } }
 FAST2SMS_API_KEY = os.environ.get('FAST2SMS_API_KEY', '3jVi78avL4iWyn5UKp31Y6Dd9Opi5lFyP0htNd8MRNKDVfeK0UfeRfyET3oAmI3MFxRtI7uaa39tAx9N')
+SMTP_HOST = os.environ.get('SMTP_HOST', 'smtp.gmail.com')
+SMTP_PORT = int(os.environ.get('SMTP_PORT', 587))
+SMTP_EMAIL = os.environ.get('SMTP_EMAIL', 'dgproofficial@gmail.com')
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
+
+def dispatch_email_otp(to_email, otp_code, customer_name="Customer", mobile_number=""):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        return False, "SMTP_PASSWORD not configured. Set SMTP_PASSWORD in Render Environment Variables."
+
+    subject = f"{otp_code} is your DGPRO Store Verification Code"
+    html_content = f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 28px; border: 1px solid #e4ddd3; border-radius: 20px; background-color: #faf8f5;">
+      <div style="text-align: center; margin-bottom: 24px;">
+        <h2 style="color: #18201e; margin: 0; font-size: 26px; font-weight: 900; letter-spacing: -0.5px;">DGPRO <span style="color: #b89252; font-style: italic;">Store</span></h2>
+        <span style="color: #8c7f70; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px;">Official Account Verification</span>
+      </div>
+      <p style="color: #333; font-size: 14px; line-height: 1.6; margin-bottom: 8px;">Hello <strong>{customer_name}</strong>,</p>
+      <p style="color: #555; font-size: 13px; line-height: 1.6; margin-bottom: 20px;">Use the 6-digit verification code below to complete your DGPRO Digital Store login for Mobile Number <strong>+91 {mobile_number}</strong>:</p>
+      <div style="text-align: center; margin: 28px 0;">
+        <span style="font-size: 34px; font-weight: 900; letter-spacing: 8px; color: #18201e; background: #efe6d8; padding: 14px 28px; border-radius: 14px; border: 2px solid #b89252; display: inline-block; font-family: monospace;">{otp_code}</span>
+      </div>
+      <p style="color: #666; font-size: 12px; line-height: 1.5; margin-bottom: 4px;">⏱️ This verification code is valid for <strong>5 minutes</strong>.</p>
+      <p style="color: #888; font-size: 12px; line-height: 1.5;">🔒 For your security, do not share this OTP with anyone.</p>
+      <hr style="border: none; border-top: 1px solid #e4ddd3; margin: 24px 0 16px 0;" />
+      <p style="color: #aaa; font-size: 11px; text-align: center; margin: 0;">DGPRO Digital Downloads Store • <a href="https://dgpro.site" style="color: #b89252; text-decoration: none; font-weight: bold;">www.dgpro.site</a></p>
+    </div>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"DGPRO Digital Store <{SMTP_EMAIL}>"
+    msg["To"] = to_email
+    msg.attach(MIMEText(f"Your DGPRO Store verification code is {otp_code}. Valid for 5 minutes.", "plain"))
+    msg.attach(MIMEText(html_content, "html"))
+
+    try:
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+        server.starttls()
+        server.login(SMTP_EMAIL.strip(), SMTP_PASSWORD.strip())
+        server.sendmail(SMTP_EMAIL.strip(), [to_email], msg.as_string())
+        server.quit()
+        print(f"📧 [EMAIL OTP SENT]: Successfully delivered code {otp_code} to {to_email}!")
+        return True, "Email OTP sent successfully."
+    except Exception as e:
+        print(f"⚠️ [EMAIL OTP FAILED]: {e}")
+        return False, str(e)
+
+FAST2SMS_OTP_ID = os.environ.get('FAST2SMS_OTP_ID', '')
 
 def load_database():
     global db
@@ -126,6 +178,40 @@ def dispatch_fast2sms(mobile_10_digit, otp_code):
 
     api_key = FAST2SMS_API_KEY.strip()
     clean_mobile = str(mobile_10_digit).strip()
+
+    # Route 0: Fast2SMS Smart OTP (WhatsApp Route - ₹0.25 per OTP)
+    if FAST2SMS_OTP_ID:
+        try:
+            req_data = json.dumps({
+                "otp_id": str(FAST2SMS_OTP_ID).strip(),
+                "mobile": clean_mobile
+            }).encode('utf-8')
+            req0 = urllib.request.Request(
+                "https://www.fast2sms.com/dev/otp/send",
+                data=req_data,
+                headers={
+                    "authorization": api_key,
+                    "Content-Type": "application/json",
+                    "accept": "application/json",
+                    "User-Agent": "Mozilla/5.0"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req0, timeout=8) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                print("\n" + "="*56)
+                print("📡 [FAST2SMS SMART OTP (WHATSAPP) RESPONSE]:", data)
+                print("="*56 + "\n")
+                if data.get('return') is True or data.get('status_code') == 200:
+                    return True, "OTP dispatched successfully via WhatsApp (Fast2SMS Smart OTP)."
+        except urllib.error.HTTPError as he:
+            try:
+                err_data = json.loads(he.read().decode('utf-8'))
+                print("\n⚠️ [FAST2SMS WHATSAPP OTP ERROR]:", err_data)
+            except Exception:
+                print("\n⚠️ [FAST2SMS WHATSAPP OTP ERROR]:", he)
+        except Exception as e0:
+            print("⚠️ Fast2SMS Smart OTP (WhatsApp) route warning:", e0)
 
     # Route 1: Fast2SMS OTP Route
     try:
@@ -1338,13 +1424,14 @@ Support Helpline: support@dgpro.store
         length = int(self.headers.get('Content-Length', 0))
         raw_body = self.rfile.read(length)
 
-        # 0A. REAL DYNAMIC CUSTOMER OTP SEND (/api/send-otp)
+        # 0A. REAL DYNAMIC CUSTOMER OTP SEND (/api/send-otp) - FREE EMAIL OTP WITH MANDATORY MOBILE NUMBER
         if path == '/api/send-otp':
             try:
                 data = json.loads(raw_body.decode('utf-8'))
             except Exception:
                 return self.send_json(400, {"error": "Invalid JSON"})
 
+            # 1. Mandatory Mobile Number Validation (Exact 10 digits)
             raw_mobile = data.get("mobile", "").strip()
             digits = "".join(c for c in raw_mobile if c.isdigit())
             if digits.startswith("91") and len(digits) > 10:
@@ -1353,41 +1440,57 @@ Support Helpline: support@dgpro.store
                 digits = digits[1:]
 
             if len(digits) != 10:
-                return self.send_json(400, {"success": False, "error": f"Invalid mobile number ({raw_mobile}). Must be exact 10 digits."})
+                return self.send_json(400, {
+                    "success": False,
+                    "error": f"Valid 10-digit Mobile Number is MANDATORY. You entered ({raw_mobile})."
+                })
 
-            # Generate real 6-digit cryptographically random OTP
+            # 2. Mandatory Email Validation
+            email = data.get("email", "").strip().lower()
+            if not email or "@" not in email or "." not in email:
+                return self.send_json(400, {
+                    "success": False,
+                    "error": "Valid Email Address is MANDATORY for receiving your free verification OTP."
+                })
+
+            name = data.get("name", "Customer").strip() or "Customer"
+
+            # 3. Generate real 6-digit cryptographically random OTP
             otp = str(secrets.randbelow(900000) + 100000)
             now = time.time()
-            customer_otps[digits] = {
+            otp_record = {
                 "otp": otp,
                 "expiresAt": now + 300,  # 5 minutes
                 "attempts": 0,
-                "name": data.get("name", "Customer"),
-                "email": data.get("email", "")
+                "name": name,
+                "email": email,
+                "mobile": digits
             }
+            customer_otps[email] = otp_record
+            customer_otps[digits] = otp_record
 
-            # Attempt Fast2SMS dispatch if API key is present
-            sms_sent, sms_msg = dispatch_fast2sms(digits, otp)
+            # 4. Dispatch Email OTP (Free 100% via SMTP)
+            email_sent, email_msg = dispatch_email_otp(email, otp, name, digits)
 
-            print("\n" + "="*56)
-            print(f"📱 [REAL CUSTOMER OTP DISPATCH] -> Mobile: +91 {digits}")
+            print("\n" + "="*58)
+            print(f"📧 [FREE EMAIL OTP DISPATCH] -> Email: {email}")
+            print(f"📱 [MANDATORY MOBILE RECORDED] -> +91 {digits}")
             print(f"👉 ACTUAL 6-DIGIT OTP:   {otp}   👈 (Valid for 5 mins)")
-            if sms_sent:
-                print(f"📡 Real SMS Sent via Fast2SMS: SUCCESS")
+            if email_sent:
+                print(f"✅ Real Email Sent via SMTP: SUCCESS -> {email}")
             else:
-                print(f"ℹ️  Terminal Output: Use code {otp} in browser to verify.")
-            print("⚠️  Fake codes like 123456 or random guesses will be 100% REJECTED.")
-            print("="*56 + "\n")
+                print(f"ℹ️  SMTP Status: {email_msg}")
+                print(f"ℹ️  Fallback: Use code {otp} in browser to verify.")
+            print("="*58 + "\n")
 
-            # If Fast2SMS dispatched, do not expose OTP in response.
-            # If Fast2SMS is not yet configured, return otp in response so client can auto-display without looking at terminal!
             resp_data = {
                 "success": True,
-                "message": f"Real 6-digit OTP generated for +91 {digits}.",
+                "message": f"6-digit Verification OTP sent to {email}.",
+                "email": email,
                 "mobile": digits,
-                "smsDispatched": sms_sent
+                "emailSent": email_sent
             }
-            if not sms_sent:
+            if not email_sent:
                 resp_data["testOtp"] = otp
 
             return self.send_json(200, resp_data)
@@ -1400,6 +1503,7 @@ Support Helpline: support@dgpro.store
                 return self.send_json(400, {"error": "Invalid JSON"})
 
             raw_mobile = data.get("mobile", "").strip()
+            raw_email = data.get("email", "").strip().lower()
             entered_otp = str(data.get("otp", "")).strip()
 
             digits = "".join(c for c in raw_mobile if c.isdigit())
@@ -1408,7 +1512,7 @@ Support Helpline: support@dgpro.store
             elif digits.startswith("0") and len(digits) == 11:
                 digits = digits[1:]
 
-            record = customer_otps.get(digits)
+            record = customer_otps.get(raw_email) or customer_otps.get(digits)
             if not record:
                 return self.send_json(400, {
                     "success": False,
@@ -1430,8 +1534,31 @@ Support Helpline: support@dgpro.store
                     "error": "3 incorrect attempts! This OTP is now destroyed. Please request a fresh OTP."
                 })
 
-            # Strict comparison: MUST MATCH EXACT REAL OTP
-            if record.get("otp") != entered_otp:
+            # Check against Fast2SMS /dev/otp/verify if WhatsApp Smart OTP was used
+            f2s_verified = False
+            if FAST2SMS_OTP_ID and FAST2SMS_API_KEY:
+                try:
+                    v_payload = json.dumps({"mobile": digits, "otp": entered_otp}).encode('utf-8')
+                    v_req = urllib.request.Request(
+                        "https://www.fast2sms.com/dev/otp/verify",
+                        data=v_payload,
+                        headers={
+                            "authorization": FAST2SMS_API_KEY.strip(),
+                            "Content-Type": "application/json",
+                            "accept": "application/json",
+                            "User-Agent": "Mozilla/5.0"
+                        },
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(v_req, timeout=6) as v_resp:
+                        v_data = json.loads(v_resp.read().decode('utf-8'))
+                        if v_data.get('return') is True or v_data.get('status_code') == 200:
+                            f2s_verified = True
+                except Exception:
+                    pass
+
+            # Strict comparison: MUST MATCH EXACT REAL OTP or Fast2SMS verified
+            if record.get("otp") != entered_otp and not f2s_verified:
                 record["attempts"] += 1
                 attempts_left = 3 - record["attempts"]
                 return self.send_json(400, {
@@ -1443,16 +1570,23 @@ Support Helpline: support@dgpro.store
             customer_otps.pop(digits, None)
 
             # Record customer in database
-            email = record.get("email", "").lower()
+            email = (record.get("email", "") or raw_email).lower()
             name = record.get("name", "Customer")
-            existing = next((c for c in db["customers"] if c.get("email", "").lower() == email), None)
-            if not existing and email:
+            mob_digits = record.get("mobile", "") or digits
+            existing = next((c for c in db["customers"] if c.get("email", "").lower() == email or (mob_digits and c.get("mobile", "").endswith(mob_digits))), None)
+            if existing:
+                if mob_digits:
+                    existing["mobile"] = "+91" + mob_digits
+                existing["verified"] = True
+                save_database()
+            elif email:
                 db["customers"].insert(0, {
                     "name": name,
                     "email": email,
-                    "mobile": "+91" + digits,
+                    "mobile": "+91" + mob_digits if mob_digits else "",
                     "signupDate": time.strftime('%d/%m/%Y'),
-                    "accountType": "Buyer"
+                    "accountType": "Buyer",
+                    "verified": True
                 })
                 save_database()
 
