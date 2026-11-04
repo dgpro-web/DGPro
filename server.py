@@ -96,10 +96,11 @@ def dispatch_email_otp(to_email, otp_code, customer_name="Customer", mobile_numb
     msg.attach(MIMEText(html_content, "html"))
 
     try:
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+        clean_pwd = SMTP_PASSWORD.replace(' ', '').strip()
+        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=12)
         server.starttls()
-        server.login(SMTP_EMAIL.strip(), SMTP_PASSWORD.strip())
-        server.sendmail(SMTP_EMAIL.strip(), [to_email], msg.as_string())
+        server.login(SMTP_EMAIL.strip(), clean_pwd)
+        server.sendmail(SMTP_EMAIL.strip(), [to_email.strip()], msg.as_string())
         server.quit()
         print(f"📧 [EMAIL OTP SENT]: Successfully delivered code {otp_code} to {to_email}!")
         return True, "Email OTP sent successfully."
