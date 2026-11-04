@@ -1978,11 +1978,36 @@ Support Helpline: support@dgpro.store
                 buyer_mobile = data.get("buyerMobile", "N/A")
                 items = [{"id": "item_direct", "title": "Direct Payment", "price": amount_paise / 100.0}]
             else:
-                items = data.get("items", [])
+                raw_items = data.get("items", [])
                 email = data.get("buyerEmail", "").strip().lower()
-                if not items or not email:
+                if not raw_items or not email:
                     return self.send_json(400, {"error": "Missing items or buyerEmail"})
-                total = sum(float(i.get("price", 0)) for i in items)
+
+                # Honor seller wholesale pricing vs regular buyer pricing
+                is_seller = bool(data.get("isSeller"))
+                items = []
+                for item in raw_items:
+                    item_dict = dict(item)
+                    reg_price = float(item_dict.get("regularPrice") or item_dict.get("price", 0))
+                    slr_price = float(item_dict.get("sellerPrice") or round(reg_price * 0.5))
+                    if is_seller and not item_dict.get("isBumpItem"):
+                        effective_price = slr_price
+                    else:
+                        effective_price = float(item_dict.get("price", reg_price))
+                    
+                    item_dict["price"] = effective_price
+                    item_dict["regularPrice"] = reg_price
+                    item_dict["sellerPrice"] = slr_price
+                    item_dict["isSellerPricing"] = is_seller
+                    items.append(item_dict)
+
+                # If frontend explicitly calculated totalAmount with discounts/seller pricing, honor it!
+                req_total = data.get("totalAmount")
+                if req_total is not None and float(req_total) > 0:
+                    total = float(req_total)
+                else:
+                    total = sum(float(i.get("price", 0)) for i in items)
+
                 amount_paise = int(round(total * 100))
                 receipt = str(data.get("receipt", "")).strip() or ("ORD-IN-" + str(secrets.randbelow(900000) + 100000))
                 buyer_name = data.get("buyerName", "Customer")
