@@ -1108,6 +1108,29 @@
     };
     let COUPONS = { "SAVE20": 0.20, "LAUNCH50": 0.50 };
 
+        function showToast(msg, duration = 3000) {
+      try {
+        let toast = document.getElementById('dgproToast');
+        if (!toast) {
+          toast = document.createElement('div');
+          toast.id = 'dgproToast';
+          toast.className = 'fixed bottom-5 right-5 z-[9999] bg-brand-dark text-white text-xs font-bold px-4 py-3 rounded-2xl shadow-2xl border border-brand-gold/40 flex items-center gap-2 transition-all duration-300 transform translate-y-10 opacity-0 pointer-events-none';
+          document.body.appendChild(toast);
+        }
+        toast.innerHTML = msg;
+        toast.classList.remove('translate-y-10', 'opacity-0', 'pointer-events-none');
+        toast.classList.add('translate-y-0', 'opacity-100');
+        if (window.toastTimeout) clearTimeout(window.toastTimeout);
+        window.toastTimeout = setTimeout(() => {
+          toast.classList.remove('translate-y-0', 'opacity-100');
+          toast.classList.add('translate-y-10', 'opacity-0', 'pointer-events-none');
+        }, duration);
+      } catch (e) {
+        console.log("Toast:", msg);
+      }
+    }
+    window.showToast = showToast;
+
     const dgproSyncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('dgpro_live_sync_channel') : null;
         // DGPRO Complete Anti-Inspect & Content Shield
     document.addEventListener('contextmenu', e => {
@@ -3248,8 +3271,7 @@
             }).catch(() => {});
           });
 
-          // Show OTP Verification UI with completely EMPTY input
-          showToast("📧 6-digit OTP sent to " + email);
+          // 1. Immediately switch UI to OTP Verification form
           if (el('loginDetailsForm')) el('loginDetailsForm').classList.add('hidden');
           if (el('otpVerifyForm')) el('otpVerifyForm').classList.remove('hidden');
           if (el('otpTargetDisplay')) {
@@ -3264,6 +3286,8 @@
             el('otpCodeInput').placeholder = 'Enter 6-digit OTP';
             el('otpCodeInput').focus();
           }
+          // 2. Trigger notification safely
+          try { showToast("📧 6-digit OTP sent to " + email); } catch(e) {}
         } catch(err) {
           console.error("OTP send error:", err);
           alert("Error sending OTP. Please check your internet connection and try again.");
