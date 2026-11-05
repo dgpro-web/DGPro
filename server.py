@@ -857,11 +857,8 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
     for (const p of productsList) {{
       const pid = p && p.id;
       if (!pid || UPLOADED_VIDEOS_TRACKER.has(pid)) continue;
+      // Always attempt sync for local Blobs to guarantee server has the binary
       const existingServerUrl = mediaMap && mediaMap[pid] && mediaMap[pid][4] && mediaMap[pid][4].videoUrl;
-      if (existingServerUrl && existingServerUrl.startsWith('/api/video/')) {{
-        UPLOADED_VIDEOS_TRACKER.add(pid);
-        continue;
-      }}
       try {{
         let rec = await loadFromIndexedDB('dgpro_v2_prod_video_' + pid);
         if (!rec || !(rec.blob instanceof Blob)) {{
@@ -1255,6 +1252,26 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_HEAD(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if path.startswith('/api/video/'):
+            pid = path.replace('/api/video/', '').strip().split('?')[0].split('/')[0]
+            safe_pid = "".join(c for c in pid if c.isalnum() or c in ('_', '-'))
+            vid_path = os.path.join(VIDEOS_DIR, f"{safe_pid}.mp4")
+            if os.path.isfile(vid_path):
+                file_size = os.path.getsize(vid_path)
+                self.send_response(200)
+                self.send_header('Content-Type', 'video/mp4')
+                self.send_header('Accept-Ranges', 'bytes')
+                self.send_header('Content-Length', str(file_size))
+                self.send_header('Cache-Control', 'public, max-age=86400')
+                self.send_cors_headers()
+                self.end_headers()
+            else:
+                self.send_response(404)
+                self.send_cors_headers()
+                self.end_headers()
+            return
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=UTF-8')
         self.send_cors_headers()
@@ -1280,7 +1297,29 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
 
         # 1B. Public Central Store Data endpoint (Products, Categories, Banners, Coupons, Bumps)
         if path in ('/api/store-data', '/api/products'):
-            return self.send_json(200, db.get("storeConfig", {}), extra_headers={
+            try:
+                cfg = json.loads(json.dumps(db.get("storeConfig", {})))
+            except Exception:
+                cfg = {}
+            pm = cfg.get("productMedia")
+            if not isinstance(pm, dict):
+                pm = {}
+            if os.path.isdir(VIDEOS_DIR):
+                for f_name in os.listdir(VIDEOS_DIR):
+                    if f_name.endswith('.mp4'):
+                        safe_pid = f_name[:-4]
+                        if safe_pid:
+                            slots = pm.get(safe_pid)
+                            if not isinstance(slots, list):
+                                slots = [None, None, None, None, None]
+                            while len(slots) < 5:
+                                slots.append(None)
+                            if not isinstance(slots[4], dict):
+                                slots[4] = {"type": "video", "explicitProductId": safe_pid, "title": "Video Demo"}
+                            slots[4]["videoUrl"] = f"/api/video/{safe_pid}"
+                            pm[safe_pid] = slots
+            cfg["productMedia"] = pm
+            return self.send_json(200, cfg, extra_headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
             })
 
