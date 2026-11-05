@@ -1457,9 +1457,9 @@ Support Helpline: support@dgpro.store
             self.wfile.write(data_bytes)
             return
 
-        # 6. Static file routing for Storefront
+        # 6. Static file routing for Storefront & Clean SEO URLs
         target_file = None
-        if path in ('/', '/index.html'):
+        if path in ('/', '/index.html', '/softwares', '/templates', '/design-assets', '/seller', '/categories'):
             target_file = os.path.join(STATIC_DIR, 'digital_downloads_store.html')
         else:
             rel = path.lstrip('/')
@@ -1481,8 +1481,16 @@ Support Helpline: support@dgpro.store
                 self.send_response(200)
                 if ext.lower() == '.html':
                     self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+                elif ext.lower() in ('.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.woff2'):
+                    self.send_header('Cache-Control', 'public, max-age=86400')
+                elif ext.lower() in ('.xml', '.txt'):
+                    self.send_header('Cache-Control', 'public, max-age=3600')
                 self.send_header('Content-Type', mime)
                 self.send_header('Content-Length', str(len(content)))
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('X-Frame-Options', 'SAMEORIGIN')
+                self.send_header('Referrer-Policy', 'strict-origin-when-cross-origin')
+                self.send_header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
                 self.send_cors_headers()
                 self.end_headers()
                 self.wfile.write(content)
