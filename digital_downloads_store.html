@@ -1688,6 +1688,16 @@
         if (u) return u;
       }
 
+      // Check server video endpoint /api/video/<pid>
+      try {
+        const headRes = await fetch('/api/video/' + encodeURIComponent(pid), { method: 'HEAD' });
+        if (headRes.ok || headRes.status === 206) {
+          const serverUrl = '/api/video/' + encodeURIComponent(pid);
+          PRODUCT_V2_VIDEO_CACHE[pid] = { productId: pid, objectUrl: serverUrl, title: (pmSlot && pmSlot.title) || 'Video Demo' };
+          return serverUrl;
+        }
+      } catch (e) {}
+
       return '';
     }
 
@@ -1883,7 +1893,7 @@
         const lightMedia = {};
         Object.keys(PRODUCT_MEDIA || {}).forEach(k => {
           if (Array.isArray(PRODUCT_MEDIA[k])) {
-            lightMedia[k] = PRODUCT_MEDIA[k].map((slot, idx) => idx === 4 ? { ...slot, videoUrl: "", videoBlob: null } : slot);
+            lightMedia[k] = PRODUCT_MEDIA[k].map((slot, idx) => idx === 4 ? { ...slot, videoUrl: (slot?.videoUrl || (slot?.fileName ? `/api/video/${k}` : '')), videoBlob: null } : slot);
           }
         });
         localStorage.setItem('dgpro_store_config', JSON.stringify({ ...fullCfg, productMedia: lightMedia }));
@@ -2178,6 +2188,30 @@
             }
             const localProds = JSON.parse(adminLocalProdsRaw);
             const localTs = Number(localCfg && localCfg.lastUpdated) || 1;
+
+            // Auto-upload any local video blobs found in IndexedDB on this browser to live server
+            if (Array.isArray(localProds)) {
+              for (const lp of localProds) {
+                if (!lp || !lp.id) continue;
+                try {
+                  let vRec = await loadFromIndexedDB('dgpro_v2_prod_video_' + lp.id);
+                  if (!vRec || !isValidVideoBlob(vRec.blob)) {
+                    vRec = await loadFromIndexedDB('dgpro_product_video_' + lp.id);
+                  }
+                  if (vRec && isValidVideoBlob(vRec.blob)) {
+                    fetch('/api/admin/upload-video?productId=' + encodeURIComponent(lp.id), {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': vRec.blob.type || 'video/mp4',
+                        'X-Product-Id': lp.id,
+                        'X-DGPRO-Admin-Sync': 'true'
+                      },
+                      body: vRec.blob
+                    }).catch(() => {});
+                  }
+                } catch(e) {}
+              }
+            }
             if (!srvHasProds || localTs > srvTs) {
               const payloadToPush = {
                 categories: (localCfg && localCfg.categories) || CATEGORIES,
@@ -3039,6 +3073,15 @@
       startPlay();
       vidEl.addEventListener('loadedmetadata', startPlay, { once: true });
       vidEl.addEventListener('canplay', startPlay, { once: true });
+      vidEl.onerror = () => {
+        viewer.innerHTML = `
+          <div class="w-full h-full bg-slate-950 text-white flex flex-col items-center justify-center p-6 text-center select-none">
+            <span class="w-12 h-12 rounded-full bg-slate-900 border border-slate-800 flex items-center justify-center text-xl mb-3 text-rose-500">▶</span>
+            <p class="text-xs sm:text-sm font-bold text-slate-200">No video uploaded for this product yet</p>
+            <p class="text-[11px] text-slate-400 mt-1">Upload a video (up to 2 minutes) for this product in Admin Panel → Media &amp; Video.</p>
+          </div>
+        `;
+      };
     }
 
     async function selectProductMediaSlot(slot) {
