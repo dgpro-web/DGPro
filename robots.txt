@@ -1,6 +1,10 @@
 User-agent: *
 Allow: /
+Allow: /sitemap.xml
+Allow: /robots.txt
 Disallow: /admin
+Disallow: /admin/login
 Disallow: /api/
 
+Host: https://dgpro.site
 Sitemap: https://dgpro.site/sitemap.xml
