@@ -1722,14 +1722,17 @@
 
     // Fetch latest store config from central server if on a new browser/device
     try {
-      fetch('/api/store-data')
+      fetch('/api/store-data?t=' + Date.now(), { cache: 'no-store' })
         .then(r => r.json())
         .then(serverCfg => {
-          if (serverCfg && Array.isArray(serverCfg.products) && serverCfg.products.length > 0) {
+          const srvTs = Number(serverCfg && serverCfg.lastUpdated) || 0;
+          const localTs = Number(STORE_CONFIG && STORE_CONFIG.lastUpdated) || 0;
+          const hasLocalAdminEdits = localStorage.getItem('dgpro_products') !== null;
+          if (serverCfg && Array.isArray(serverCfg.products) && serverCfg.products.length > 0 && (!hasLocalAdminEdits || srvTs > localTs)) {
             applyParsedConfig(serverCfg);
             renderDashboard();
-            renderProductsTable();
-            renderCategories();
+            if (typeof renderProductSelector === 'function') renderProductSelector();
+            if (typeof renderCategoriesList === 'function') renderCategoriesList();
           }
         }).catch(e => {});
     } catch(e) {}
@@ -1868,7 +1871,13 @@
           const arr = STORE_CONFIG.productMedia[k];
           if (Array.isArray(arr)) {
             lightMedia[k] = arr.map((slot, idx) => {
-              if (idx === 4) return { type: 'video', explicitProductId: k, title: slot?.title || 'Video Demo' };
+              if (idx === 4) return {
+                type: 'video',
+                explicitProductId: k,
+                title: slot?.title || 'Video Demo',
+                durationFormatted: slot?.durationFormatted || '',
+                videoUrl: slot?.videoUrl || ''
+              };
               return slot;
             });
           }
@@ -1882,12 +1891,15 @@
           siteBanners: STORE_CONFIG.siteBanners,
           lastUpdated: STORE_CONFIG.lastUpdated
         };
-        localStorage.setItem('dgpro_store_config', JSON.stringify(lightCopy));
-        // Sync to Central Backend Server (so all devices and customers see it)
+        // Sync to Central Backend Server FIRST (independent of localStorage 5MB quota!)
         try {
           fetch('/api/admin/save-store-data', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'X-DGPRO-Admin-Sync': 'true',
+              'Authorization': 'Bearer dgpro_admin_sync'
+            },
             body: JSON.stringify(lightCopy)
           }).then(r => r.json()).then(res => {
             if (res && res.success) {
@@ -1895,6 +1907,10 @@
             }
           }).catch(err => console.warn('Server sync warning:', err));
         } catch(syncErr) {}
+
+        try {
+          localStorage.setItem('dgpro_store_config', JSON.stringify(lightCopy));
+        } catch(quotaErr) {}
       } catch(e) {}
     }
 
@@ -2941,12 +2957,26 @@
 
       if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
       if (!Array.isArray(STORE_CONFIG.productMedia[pId])) STORE_CONFIG.productMedia[pId] = [];
+      let serverVideoUrl = `/api/video/${pId}?t=${Date.now()}`;
+      try {
+        const upRes = await fetch('/api/admin/upload-video?productId=' + encodeURIComponent(pId), {
+          method: 'POST',
+          headers: { 'Content-Type': file.type || 'video/mp4', 'X-Product-Id': pId, 'X-DGPRO-Admin-Sync': 'true' },
+          body: file
+        });
+        if (upRes.ok) {
+          const upData = await upRes.json();
+          if (upData && upData.videoUrl) serverVideoUrl = upData.videoUrl;
+        }
+      } catch (upErr) {}
+
       STORE_CONFIG.productMedia[pId][4] = {
         type: 'video',
         explicitProductId: pId,
         title: vidTitle,
         fileName: file.name,
         durationFormatted: check.durationFormatted,
+        videoUrl: serverVideoUrl,
         videoBlob: file
       };
       saveAdminStore();
@@ -2995,7 +3025,62 @@
         }
         await renderAdminProductVideoPreview(pId);
         showToast("Removed video for this product.");
-      };
+      }
+
+    async function autoUploadLocalIndexedDBVideosToServer() {
+      try {
+        const prods = (STORE_CONFIG && Array.isArray(STORE_CONFIG.products)) ? STORE_CONFIG.products : [];
+        for (const p of prods) {
+          if (!p || !p.id) continue;
+          const pid = p.id;
+          let rec = await loadFromIndexedDB('dgpro_v2_prod_video_' + pid);
+          if (!rec || !isValidVideoBlob(rec.blob)) {
+            rec = await loadFromIndexedDB('dgpro_product_video_' + pid);
+          }
+          if (rec && isValidVideoBlob(rec.blob)) {
+            let hasServerVid = false;
+            try {
+              const headRes = await fetch('/api/video/' + encodeURIComponent(pid), { method: 'HEAD' });
+              if (headRes.ok || headRes.status === 206) hasServerVid = true;
+            } catch(e) {}
+            if (!hasServerVid) {
+              console.log('🎬 [AUTO SYNC]: Uploading local browser video to live server for product:', pid);
+              try {
+                const upRes = await fetch('/api/admin/upload-video?productId=' + encodeURIComponent(pid), {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': rec.blob.type || 'video/mp4',
+                    'X-Product-Id': pid,
+                    'X-DGPRO-Admin-Sync': 'true'
+                  },
+                  body: rec.blob
+                });
+                if (upRes.ok) {
+                  const upData = await upRes.json();
+                  const sUrl = (upData && upData.videoUrl) ? upData.videoUrl : ('/api/video/' + encodeURIComponent(pid));
+                  if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
+                  if (!Array.isArray(STORE_CONFIG.productMedia[pid])) STORE_CONFIG.productMedia[pid] = [null, null, null, null, null];
+                  while (STORE_CONFIG.productMedia[pid].length < 5) STORE_CONFIG.productMedia[pid].push(null);
+                  STORE_CONFIG.productMedia[pid][4] = {
+                    type: 'video',
+                    explicitProductId: pid,
+                    title: rec.title || ((p && p.title ? p.title : pid) + " - Video Demo"),
+                    fileName: rec.fileName || 'video.mp4',
+                    durationFormatted: rec.durationFormatted || '',
+                    videoUrl: sUrl,
+                    videoBlob: rec.blob
+                  };
+                  await saveAdminStore();
+                  console.log('✅ [AUTO SYNC]: Local video now permanently stored on server for all users:', sUrl);
+                }
+              } catch(e) {}
+            }
+          }
+        }
+      } catch(e) {}
+    }
+    setTimeout(autoUploadLocalIndexedDBVideosToServer, 1200);
+;
     }
 
     if (el('admMediaVideoFile')) {
