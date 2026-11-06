@@ -968,15 +968,49 @@
         return PRODUCT_V2_VIDEO_CACHE[pid].objectUrl;
       }
       const pmSlot = PRODUCT_MEDIA[pid] && PRODUCT_MEDIA[pid][4];
-      if (pmSlot && pmSlot.videoUrl) return pmSlot.videoUrl;
+      if (pmSlot && pmSlot.videoUrl && pmSlot.videoUrl.trim() !== '') {
+        return pmSlot.videoUrl.trim();
+      }
 
-      // Check server video endpoint
+      // 1. Check product property fallback
+      const pObj = PRODUCTS.find(p => p.id === pid);
+      if (pObj && pObj.videoUrl && pObj.videoUrl.trim() !== '') {
+        return pObj.videoUrl.trim();
+      }
+
+      // 2. Check localStorage persistent sync
+      try {
+        const localCfgRaw = localStorage.getItem('dgpro_store_config');
+        if (localCfgRaw) {
+          const lCfg = JSON.parse(localCfgRaw);
+          if (lCfg && lCfg.productMedia && lCfg.productMedia[pid] && lCfg.productMedia[pid][4] && lCfg.productMedia[pid][4].videoUrl) {
+            return lCfg.productMedia[pid][4].videoUrl.trim();
+          }
+        }
+      } catch (e) {}
+
+      // 3. Check direct localStorage key
+      try {
+        const lsDirect = localStorage.getItem('dgpro_video_' + pid);
+        if (lsDirect && lsDirect.trim() !== '') return lsDirect.trim();
+      } catch (e) {}
+
+      // 4. Check server streaming endpoint
       try {
         const headRes = await fetch('/api/video/' + encodeURIComponent(pid), { method: 'HEAD' });
         if (headRes.ok || headRes.status === 206) {
           return '/api/video/' + encodeURIComponent(pid);
         }
       } catch (e) {}
+
+      // 5. Check default demo video on server
+      try {
+        const dRes = await fetch('/api/video/demo', { method: 'HEAD' });
+        if (dRes.ok || dRes.status === 206) {
+          return '/api/video/demo';
+        }
+      } catch (e) {}
+
       return '';
     }
 
@@ -1477,6 +1511,24 @@
 
     // --- STORE DATA CLOUD SYNC ---
     async function syncStoreDataFromBackend() {
+      // 1. Initial hydrate from local persistent storage (0ms instant display)
+      try {
+        const cachedRaw = localStorage.getItem('dgpro_store_config');
+        if (cachedRaw) {
+          const cCfg = JSON.parse(cachedRaw);
+          if (cCfg.productMedia && typeof cCfg.productMedia === 'object') {
+            PRODUCT_MEDIA = cCfg.productMedia;
+          }
+          if (Array.isArray(cCfg.products) && cCfg.products.length > 0) {
+            PRODUCTS = cCfg.products;
+          }
+          if (Array.isArray(cCfg.categories) && cCfg.categories.length > 0) {
+            CATEGORIES = cCfg.categories;
+          }
+        }
+      } catch (e) {}
+
+      // 2. Fetch authoritative updates from server
       try {
         const res = await fetch('/api/store-data?t=' + Date.now(), { cache: 'no-store' });
         if (res.ok) {
@@ -1487,9 +1539,27 @@
           if (cfg && Array.isArray(cfg.categories) && cfg.categories.length > 0) {
             CATEGORIES = cfg.categories;
           }
-          if (cfg && cfg.productMedia) {
-            PRODUCT_MEDIA = cfg.productMedia;
+          if (cfg && cfg.productMedia && typeof cfg.productMedia === 'object') {
+            // Merge without overwriting valid active video URLs with empty slots
+            Object.keys(cfg.productMedia).forEach(k => {
+              const incoming = cfg.productMedia[k];
+              const existing = PRODUCT_MEDIA[k];
+              if (Array.isArray(incoming) && incoming[4]) {
+                if (!incoming[4].videoUrl && existing && existing[4] && existing[4].videoUrl) {
+                  incoming[4].videoUrl = existing[4].videoUrl;
+                }
+              }
+              PRODUCT_MEDIA[k] = incoming;
+            });
           }
+          try {
+            localStorage.setItem('dgpro_store_config', JSON.stringify({
+              products: PRODUCTS,
+              categories: CATEGORIES,
+              productMedia: PRODUCT_MEDIA,
+              lastUpdated: Date.now()
+            }));
+          } catch (e) {}
           renderCategories();
           renderCatalog();
         }
