@@ -1096,7 +1096,7 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       let fastUrl = isUsableRemoteOrSessionVideoUrl(slot.videoUrl) ? slot.videoUrl.trim() : getImmediateSyncVideoUrl(pid);
       if (fastUrl) {{
         if (typeof mountPlayableVideoInViewer === 'function') {{
-          mountPlayableVideoInViewer(viewer, fastUrl, slot);
+          mountPlayableVideoInViewer(viewer, fastUrl);
         }}
         return;
       }}
@@ -1131,7 +1131,7 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       if (typeof currentDetailMediaSlotIdx !== 'undefined' && currentDetailMediaSlotIdx !== 4) return;
       if (isUsableRemoteOrSessionVideoUrl(asyncUrl)) {{
         if (typeof mountPlayableVideoInViewer === 'function') {{
-          mountPlayableVideoInViewer(viewer, asyncUrl, slot);
+          mountPlayableVideoInViewer(viewer, asyncUrl);
         }}
       }} else {{
         viewer.innerHTML = `
@@ -1253,14 +1253,20 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       }};
     }}
 
-    // Storefront visitors ONLY pull authoritative config from the server (never overwrite server with visitor localStorage!)
+    // Storefront pulls authoritative config from the server and uploads any local IndexedDB video blobs if present on Admin's browser
     async function syncStorefrontWithServer() {{
       try {{
+        if (typeof PRODUCTS !== 'undefined' && Array.isArray(PRODUCTS)) {{
+          await syncAllLocalVideosToServer(PRODUCTS, (typeof PRODUCT_MEDIA !== 'undefined' ? PRODUCT_MEDIA : {{}}));
+        }}
         const res = await fetch('/api/store-data?t=' + Date.now(), {{ cache: 'no-store' }});
         const srvCfg = res.ok ? await res.json() : window.__DGPRO_SERVER_STORE_CONFIG__;
         const srvHasProds = srvCfg && Array.isArray(srvCfg.products) && srvCfg.products.length > 0;
         if (srvHasProds) {{
           applyAuthoritativeServerConfig(srvCfg);
+        }}
+        if (typeof loadAllV2ProductVideosFromIndexedDB === 'function') {{
+          loadAllV2ProductVideosFromIndexedDB();
         }}
       }} catch (err) {{
         if (window.__DGPRO_SERVER_STORE_CONFIG__ && Array.isArray(window.__DGPRO_SERVER_STORE_CONFIG__.products) && window.__DGPRO_SERVER_STORE_CONFIG__.products.length > 0) {{
