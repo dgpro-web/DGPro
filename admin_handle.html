@@ -1666,23 +1666,39 @@
           const incoming = parsed.productMedia[k];
           const existing = STORE_CONFIG.productMedia ? STORE_CONFIG.productMedia[k] : null;
           if (Array.isArray(incoming)) {
-            if (existing && existing[4] && existing[4].videoUrl && incoming[4] && !incoming[4].videoUrl) {
-              incoming[4].videoUrl = existing[4].videoUrl;
-            }
-            if (incoming[4] && incoming[4].videoBlob && !(incoming[4].videoBlob instanceof Blob)) {
-              incoming[4].videoBlob = null;
-            }
-            if (incoming[4] && !(incoming[4].videoBlob instanceof Blob) && incoming[4].videoUrl && incoming[4].videoUrl.startsWith('data:')) {
-              const migBlob = convertAdminDataUrlToBlob(incoming[4].videoUrl);
-              if (migBlob) {
-                incoming[4].videoBlob = migBlob;
+            if (incoming[4]) {
+              if (incoming[4].videoUrl && incoming[4].videoUrl.startsWith('blob:')) {
                 incoming[4].videoUrl = '';
               }
-            } else if (incoming[4] && (incoming[4].videoBlob instanceof Blob) && incoming[4].videoUrl && incoming[4].videoUrl.startsWith('data:')) {
-              incoming[4].videoUrl = '';
-            }
-            if (existing && existing[4] && (existing[4].videoBlob instanceof Blob) && incoming[4] && !(incoming[4].videoBlob instanceof Blob)) {
-              incoming[4].videoBlob = existing[4].videoBlob;
+              if (existing && existing[4]) {
+                if (!incoming[4].videoUrl && existing[4].videoUrl && !existing[4].videoUrl.startsWith('blob:')) {
+                  incoming[4].videoUrl = existing[4].videoUrl;
+                }
+                if (!incoming[4].fileName && existing[4].fileName) {
+                  incoming[4].fileName = existing[4].fileName;
+                }
+                if (!incoming[4].durationFormatted && existing[4].durationFormatted) {
+                  incoming[4].durationFormatted = existing[4].durationFormatted;
+                }
+              }
+              if (incoming[4].videoBlob && !(incoming[4].videoBlob instanceof Blob)) {
+                incoming[4].videoBlob = null;
+              }
+              if (!(incoming[4].videoBlob instanceof Blob) && incoming[4].videoUrl && incoming[4].videoUrl.startsWith('data:')) {
+                const migBlob = convertAdminDataUrlToBlob(incoming[4].videoUrl);
+                if (migBlob) {
+                  incoming[4].videoBlob = migBlob;
+                  incoming[4].videoUrl = '/api/video/' + encodeURIComponent(k);
+                }
+              } else if ((incoming[4].videoBlob instanceof Blob) && incoming[4].videoUrl && incoming[4].videoUrl.startsWith('data:')) {
+                incoming[4].videoUrl = '/api/video/' + encodeURIComponent(k);
+              }
+              if (existing && existing[4] && (existing[4].videoBlob instanceof Blob) && !(incoming[4].videoBlob instanceof Blob)) {
+                incoming[4].videoBlob = existing[4].videoBlob;
+              }
+              if (!incoming[4].videoUrl && (incoming[4].fileName || (incoming[4].videoBlob instanceof Blob))) {
+                incoming[4].videoUrl = '/api/video/' + encodeURIComponent(k);
+              }
             }
             STORE_CONFIG.productMedia[k] = incoming;
           }
@@ -1748,7 +1764,8 @@
 
       for (const p of (STORE_CONFIG.products || [])) {
         const pid = p.id;
-        const directVid = await loadFromIndexedDB('dgpro_product_video_' + pid);
+        let directVid = await loadFromIndexedDB('dgpro_v2_prod_video_' + pid);
+        if (!directVid) directVid = await loadFromIndexedDB('dgpro_product_video_' + pid);
         const pmSlot = (STORE_CONFIG.productMedia && STORE_CONFIG.productMedia[pid]) ? STORE_CONFIG.productMedia[pid][4] : null;
         const isAuthentic = Boolean(
           directVid &&
@@ -1756,34 +1773,27 @@
           (directVid.explicitProductId === pid || directVid.fileName || latestOwnerPid === pid)
         );
 
-        if (directVid && !isAuthentic) {
-          saveToIndexedDB('dgpro_product_video_' + pid, null);
-          if (pmSlot && !pmSlot.explicitProductId && !pmSlot.fileName) {
-            pmSlot.videoBlob = null;
-            pmSlot.videoUrl = '';
-            cleanedAny = true;
-          }
-          continue;
-        }
-
-        if (!directVid && pmSlot && (pmSlot.videoBlob || pmSlot.videoUrl) && !pmSlot.explicitProductId && !pmSlot.fileName && latestOwnerPid && latestOwnerPid !== pid) {
-          pmSlot.videoBlob = null;
-          pmSlot.videoUrl = '';
-          cleanedAny = true;
-          continue;
-        }
-
         if (isAuthentic && (directVid.videoUrl || (directVid.blob instanceof Blob))) {
-          if (STORE_CONFIG.productMedia && STORE_CONFIG.productMedia[pid] && STORE_CONFIG.productMedia[pid][4]) {
-            STORE_CONFIG.productMedia[pid][4].explicitProductId = pid;
-            if (directVid.fileName) STORE_CONFIG.productMedia[pid][4].fileName = directVid.fileName;
-            if (!STORE_CONFIG.productMedia[pid][4].videoUrl && directVid.videoUrl) {
-              STORE_CONFIG.productMedia[pid][4].videoUrl = directVid.videoUrl;
-            }
-            if (!(STORE_CONFIG.productMedia[pid][4].videoBlob instanceof Blob) && (directVid.blob instanceof Blob)) {
-              STORE_CONFIG.productMedia[pid][4].videoBlob = directVid.blob;
-            }
+          if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
+          if (!Array.isArray(STORE_CONFIG.productMedia[pid])) STORE_CONFIG.productMedia[pid] = [null, null, null, null, null];
+          while (STORE_CONFIG.productMedia[pid].length < 5) STORE_CONFIG.productMedia[pid].push(null);
+          if (!STORE_CONFIG.productMedia[pid][4]) {
+            STORE_CONFIG.productMedia[pid][4] = { type: 'video', explicitProductId: pid, title: directVid.title || (p.title + ' - Video Demo') };
           }
+          STORE_CONFIG.productMedia[pid][4].explicitProductId = pid;
+          if (directVid.fileName) STORE_CONFIG.productMedia[pid][4].fileName = directVid.fileName;
+          if (directVid.durationFormatted) STORE_CONFIG.productMedia[pid][4].durationFormatted = directVid.durationFormatted;
+          if (directVid.title) STORE_CONFIG.productMedia[pid][4].title = directVid.title;
+          if (!STORE_CONFIG.productMedia[pid][4].videoUrl || STORE_CONFIG.productMedia[pid][4].videoUrl.startsWith('blob:')) {
+            STORE_CONFIG.productMedia[pid][4].videoUrl = (directVid.videoUrl && !directVid.videoUrl.startsWith('blob:'))
+              ? directVid.videoUrl
+              : ('/api/video/' + encodeURIComponent(pid));
+          }
+          if (!(STORE_CONFIG.productMedia[pid][4].videoBlob instanceof Blob) && (directVid.blob instanceof Blob)) {
+            STORE_CONFIG.productMedia[pid][4].videoBlob = directVid.blob;
+          }
+        } else if (pmSlot && pmSlot.videoUrl && pmSlot.videoUrl.startsWith('blob:')) {
+          pmSlot.videoUrl = (pmSlot.fileName || (pmSlot.videoBlob instanceof Blob)) ? ('/api/video/' + encodeURIComponent(pid)) : '';
         }
       }
       if (cleanedAny) {
@@ -1871,13 +1881,23 @@
           const arr = STORE_CONFIG.productMedia[k];
           if (Array.isArray(arr)) {
             lightMedia[k] = arr.map((slot, idx) => {
-              if (idx === 4) return {
-                type: 'video',
-                explicitProductId: k,
-                title: slot?.title || 'Video Demo',
-                durationFormatted: slot?.durationFormatted || '',
-                videoUrl: slot?.videoUrl || ''
-              };
+              if (idx === 4) {
+                if (!slot) return null;
+                let cleanVideoUrl = (slot.videoUrl && typeof slot.videoUrl === 'string' && !slot.videoUrl.startsWith('blob:') && !slot.videoUrl.startsWith('data:'))
+                  ? slot.videoUrl.trim()
+                  : '';
+                if (!cleanVideoUrl && (slot.fileName || isValidVideoBlob(slot.videoBlob))) {
+                  cleanVideoUrl = '/api/video/' + encodeURIComponent(k);
+                }
+                return {
+                  type: 'video',
+                  explicitProductId: k,
+                  title: slot.title || 'Video Demo',
+                  fileName: slot.fileName || '',
+                  durationFormatted: slot.durationFormatted || '',
+                  videoUrl: cleanVideoUrl
+                };
+              }
               return slot;
             });
           }
@@ -2782,8 +2802,29 @@
 
         if (admMediaProductSelector && admMediaProductSelector.value !== pId) return;
 
-        const hasBlob = Boolean(savedVid && isValidVideoBlob(savedVid.blob));
-        const hasUrl = Boolean(savedVid && savedVid.videoUrl && typeof savedVid.videoUrl === 'string' && savedVid.videoUrl.trim() !== '');
+        let hasBlob = Boolean(savedVid && isValidVideoBlob(savedVid.blob));
+        let cleanSavedUrl = (savedVid && savedVid.videoUrl && typeof savedVid.videoUrl === 'string' && !savedVid.videoUrl.startsWith('blob:'))
+          ? savedVid.videoUrl.trim()
+          : '';
+        if (!hasBlob && !cleanSavedUrl) {
+          try {
+            const headRes = await fetch('/api/video/' + encodeURIComponent(pId), { method: 'HEAD', cache: 'no-store' });
+            if (headRes.ok || headRes.status === 206) {
+              cleanSavedUrl = '/api/video/' + encodeURIComponent(pId);
+              if (!savedVid) {
+                savedVid = {
+                  productId: pId,
+                  title: `${prodTitle} - Official Demo Video`,
+                  fileName: 'server_video.mp4',
+                  videoUrl: cleanSavedUrl
+                };
+              } else {
+                savedVid.videoUrl = cleanSavedUrl;
+              }
+            }
+          } catch (e) {}
+        }
+        const hasUrl = Boolean(cleanSavedUrl !== '');
 
         if (savedVid && (hasBlob || hasUrl)) {
           let previewSrc = '';
@@ -2793,7 +2834,7 @@
             }
             previewSrc = savedVid.blob._adminPreviewUrl;
           } else if (hasUrl) {
-            previewSrc = savedVid.videoUrl.trim();
+            previewSrc = cleanSavedUrl;
           }
 
           if (clearBtn) clearBtn.classList.remove('hidden');
@@ -2802,10 +2843,10 @@
           }
           box.innerHTML = `
             <div class="flex items-center gap-3">
-              <video src="${previewSrc}" class="w-24 h-14 object-cover rounded-lg border border-emerald-400 bg-black flex-shrink-0" muted autoplay loop playsinline></video>
+              <video src="${previewSrc}" class="w-24 h-14 object-cover rounded-lg border border-emerald-400 bg-black flex-shrink-0" muted autoplay loop playsinline preload="metadata"></video>
               <div>
                 <strong class="text-emerald-400 block">✓ Active Video for "${prodTitle}"</strong>
-                <span class="text-[11px] text-slate-300 font-mono">${savedVid.fileName || 'video.mp4'} • Max 2 Min Preview</span>
+                <span class="text-[11px] text-slate-300 font-mono">${savedVid.fileName || 'video.mp4'} • ${savedVid.durationFormatted ? savedVid.durationFormatted + ' • ' : ''}Max 2 Min Preview</span>
               </div>
             </div>
           `;
@@ -2957,11 +2998,16 @@
 
       if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
       if (!Array.isArray(STORE_CONFIG.productMedia[pId])) STORE_CONFIG.productMedia[pId] = [];
-      let serverVideoUrl = `/api/video/${pId}?t=${Date.now()}`;
+      let serverVideoUrl = `/api/video/${encodeURIComponent(pId)}?t=${Date.now()}`;
       try {
         const upRes = await fetch('/api/admin/upload-video?productId=' + encodeURIComponent(pId), {
           method: 'POST',
-          headers: { 'Content-Type': file.type || 'video/mp4', 'X-Product-Id': pId, 'X-DGPRO-Admin-Sync': 'true' },
+          headers: {
+            'Content-Type': file.type || 'video/mp4',
+            'X-Product-Id': pId,
+            'X-DGPRO-Admin-Sync': 'true',
+            'Authorization': 'Bearer dgpro_admin_sync'
+          },
           body: file
         });
         if (upRes.ok) {
@@ -2970,6 +3016,11 @@
         }
       } catch (upErr) {}
 
+      v2Payload.videoUrl = serverVideoUrl;
+      await saveToIndexedDB('dgpro_v2_prod_video_' + pId, v2Payload);
+      await saveToIndexedDB('dgpro_product_video_' + pId, v2Payload);
+
+      while (STORE_CONFIG.productMedia[pId].length < 5) STORE_CONFIG.productMedia[pId].push(null);
       STORE_CONFIG.productMedia[pId][4] = {
         type: 'video',
         explicitProductId: pId,
@@ -2979,7 +3030,7 @@
         videoUrl: serverVideoUrl,
         videoBlob: file
       };
-      saveAdminStore();
+      await saveAdminStore();
 
       if (dgproSyncChannel) {
         try {
@@ -2988,11 +3039,12 @@
             productId: pId,
             payload: {
               productId: pId,
+              explicitProductId: pId,
               title: vidTitle,
               fileName: file.name,
               fileType: file.type || 'video/mp4',
               durationFormatted: check.durationFormatted,
-              blob: file,
+              videoUrl: serverVideoUrl,
               updatedAt: v2Payload.updatedAt
             }
           });
@@ -3009,10 +3061,16 @@
         await saveToIndexedDB('dgpro_v2_prod_video_' + pId, null);
         await saveToIndexedDB('dgpro_product_video_' + pId, null);
         try { localStorage.removeItem('dgpro_product_video_' + pId); } catch(e){}
+        try {
+          await fetch('/api/admin/delete-video?productId=' + encodeURIComponent(pId), {
+            method: 'POST',
+            headers: { 'X-Product-Id': pId, 'X-DGPRO-Admin-Sync': 'true', 'Authorization': 'Bearer dgpro_admin_sync' }
+          });
+        } catch(e){}
         if (STORE_CONFIG.productMedia && STORE_CONFIG.productMedia[pId]) {
           STORE_CONFIG.productMedia[pId][4] = null;
         }
-        saveAdminStore();
+        await saveAdminStore();
         if (el('admMediaVideoFile')) el('admMediaVideoFile').value = "";
         if (dgproSyncChannel) {
           try {
@@ -3025,11 +3083,13 @@
         }
         await renderAdminProductVideoPreview(pId);
         showToast("Removed video for this product.");
-      }
+      };
+    }
 
     async function autoUploadLocalIndexedDBVideosToServer() {
       try {
         const prods = (STORE_CONFIG && Array.isArray(STORE_CONFIG.products)) ? STORE_CONFIG.products : [];
+        let needsStoreSave = false;
         for (const p of prods) {
           if (!p || !p.id) continue;
           const pid = p.id;
@@ -3037,12 +3097,15 @@
           if (!rec || !isValidVideoBlob(rec.blob)) {
             rec = await loadFromIndexedDB('dgpro_product_video_' + pid);
           }
+
+          let hasServerVid = false;
+          try {
+            const headRes = await fetch('/api/video/' + encodeURIComponent(pid), { method: 'HEAD', cache: 'no-store' });
+            if (headRes.ok || headRes.status === 206) hasServerVid = true;
+          } catch(e) {}
+
           if (rec && isValidVideoBlob(rec.blob)) {
-            let hasServerVid = false;
-            try {
-              const headRes = await fetch('/api/video/' + encodeURIComponent(pid), { method: 'HEAD' });
-              if (headRes.ok || headRes.status === 206) hasServerVid = true;
-            } catch(e) {}
+            let sUrl = '/api/video/' + encodeURIComponent(pid);
             if (!hasServerVid) {
               console.log('🎬 [AUTO SYNC]: Uploading local browser video to live server for product:', pid);
               try {
@@ -3051,37 +3114,59 @@
                   headers: {
                     'Content-Type': rec.blob.type || 'video/mp4',
                     'X-Product-Id': pid,
-                    'X-DGPRO-Admin-Sync': 'true'
+                    'X-DGPRO-Admin-Sync': 'true',
+                    'Authorization': 'Bearer dgpro_admin_sync'
                   },
                   body: rec.blob
                 });
                 if (upRes.ok) {
                   const upData = await upRes.json();
-                  const sUrl = (upData && upData.videoUrl) ? upData.videoUrl : ('/api/video/' + encodeURIComponent(pid));
-                  if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
-                  if (!Array.isArray(STORE_CONFIG.productMedia[pid])) STORE_CONFIG.productMedia[pid] = [null, null, null, null, null];
-                  while (STORE_CONFIG.productMedia[pid].length < 5) STORE_CONFIG.productMedia[pid].push(null);
-                  STORE_CONFIG.productMedia[pid][4] = {
-                    type: 'video',
-                    explicitProductId: pid,
-                    title: rec.title || ((p && p.title ? p.title : pid) + " - Video Demo"),
-                    fileName: rec.fileName || 'video.mp4',
-                    durationFormatted: rec.durationFormatted || '',
-                    videoUrl: sUrl,
-                    videoBlob: rec.blob
-                  };
-                  await saveAdminStore();
+                  if (upData && upData.videoUrl) sUrl = upData.videoUrl;
+                  hasServerVid = true;
                   console.log('✅ [AUTO SYNC]: Local video now permanently stored on server for all users:', sUrl);
                 }
               } catch(e) {}
             }
+            if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
+            if (!Array.isArray(STORE_CONFIG.productMedia[pid])) STORE_CONFIG.productMedia[pid] = [null, null, null, null, null];
+            while (STORE_CONFIG.productMedia[pid].length < 5) STORE_CONFIG.productMedia[pid].push(null);
+            const curSlot4 = STORE_CONFIG.productMedia[pid][4];
+            if (!curSlot4 || !curSlot4.videoUrl || curSlot4.videoUrl.startsWith('blob:') || !curSlot4.fileName) {
+              STORE_CONFIG.productMedia[pid][4] = {
+                type: 'video',
+                explicitProductId: pid,
+                title: (curSlot4 && curSlot4.title) || rec.title || ((p && p.title ? p.title : pid) + " - Video Demo"),
+                fileName: (curSlot4 && curSlot4.fileName) || rec.fileName || 'video.mp4',
+                durationFormatted: (curSlot4 && curSlot4.durationFormatted) || rec.durationFormatted || '',
+                videoUrl: sUrl,
+                videoBlob: rec.blob
+              };
+              needsStoreSave = true;
+            }
+          } else if (hasServerVid) {
+            if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
+            if (!Array.isArray(STORE_CONFIG.productMedia[pid])) STORE_CONFIG.productMedia[pid] = [null, null, null, null, null];
+            while (STORE_CONFIG.productMedia[pid].length < 5) STORE_CONFIG.productMedia[pid].push(null);
+            const curSlot4 = STORE_CONFIG.productMedia[pid][4];
+            if (!curSlot4 || !curSlot4.videoUrl || curSlot4.videoUrl.startsWith('blob:')) {
+              STORE_CONFIG.productMedia[pid][4] = {
+                type: 'video',
+                explicitProductId: pid,
+                title: (curSlot4 && curSlot4.title) || ((p && p.title ? p.title : pid) + " - Video Demo"),
+                fileName: (curSlot4 && curSlot4.fileName) || 'server_video.mp4',
+                durationFormatted: (curSlot4 && curSlot4.durationFormatted) || '',
+                videoUrl: '/api/video/' + encodeURIComponent(pid)
+              };
+              needsStoreSave = true;
+            }
           }
+        }
+        if (needsStoreSave) {
+          await saveAdminStore();
         }
       } catch(e) {}
     }
     setTimeout(autoUploadLocalIndexedDBVideosToServer, 1200);
-;
-    }
 
     if (el('admMediaVideoFile')) {
       el('admMediaVideoFile').onchange = async e => {
@@ -3119,7 +3204,33 @@
         }
 
         const prevMedia = (STORE_CONFIG.productMedia && STORE_CONFIG.productMedia[pId]) ? STORE_CONFIG.productMedia[pId] : [];
-        const existingSlot4 = prevMedia[4] || null;
+        let existingSlot4 = prevMedia[4] || null;
+        const customVidTitle = el('admMediaVideoTitle')?.value.trim();
+        let idbVidRec = await loadFromIndexedDB('dgpro_v2_prod_video_' + pId);
+        if (!idbVidRec) idbVidRec = await loadFromIndexedDB('dgpro_product_video_' + pId);
+        if (existingSlot4 || idbVidRec) {
+          const cleanUrl = (existingSlot4 && existingSlot4.videoUrl && !existingSlot4.videoUrl.startsWith('blob:'))
+            ? existingSlot4.videoUrl
+            : ((idbVidRec && idbVidRec.videoUrl && !idbVidRec.videoUrl.startsWith('blob:'))
+                ? idbVidRec.videoUrl
+                : ((existingSlot4?.fileName || idbVidRec?.fileName || isValidVideoBlob(existingSlot4?.videoBlob) || isValidVideoBlob(idbVidRec?.blob))
+                    ? ('/api/video/' + encodeURIComponent(pId))
+                    : ''));
+          existingSlot4 = {
+            type: 'video',
+            explicitProductId: pId,
+            title: customVidTitle || existingSlot4?.title || idbVidRec?.title || 'Video Demo',
+            fileName: existingSlot4?.fileName || idbVidRec?.fileName || '',
+            durationFormatted: existingSlot4?.durationFormatted || idbVidRec?.durationFormatted || '',
+            videoUrl: cleanUrl,
+            videoBlob: isValidVideoBlob(existingSlot4?.videoBlob) ? existingSlot4.videoBlob : (isValidVideoBlob(idbVidRec?.blob) ? idbVidRec.blob : null)
+          };
+          if (idbVidRec && customVidTitle && idbVidRec.title !== customVidTitle) {
+            idbVidRec.title = customVidTitle;
+            await saveToIndexedDB('dgpro_v2_prod_video_' + pId, idbVidRec);
+            await saveToIndexedDB('dgpro_product_video_' + pId, idbVidRec);
+          }
+        }
 
         const f1 = el('admMediaFile1')?.files?.[0];
         const f2 = el('admMediaFile2')?.files?.[0];
