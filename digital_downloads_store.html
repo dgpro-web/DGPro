@@ -2796,12 +2796,14 @@
       }
 
       const v2Cached = PRODUCT_V2_VIDEO_CACHE[product.id];
+      const cm4 = customMedia[4];
       slots.push({
         type: 'video',
         productId: product.id,
         slotLabel: `Video Demo`,
-        title: v2Cached?.title || `${product.title} - Video Demo`,
-        durationFormatted: v2Cached?.durationFormatted || '',
+        title: (cm4 && cm4.title) || v2Cached?.title || `${product.title} - Video Demo`,
+        durationFormatted: (cm4 && cm4.durationFormatted) || v2Cached?.durationFormatted || '',
+        videoUrl: (v2Cached && v2Cached.objectUrl) || (cm4 && cm4.videoUrl) || '',
         thumbIcon: '▶'
       });
 
