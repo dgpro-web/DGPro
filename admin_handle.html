@@ -1699,6 +1699,9 @@
               if (!incoming[4].videoUrl && (incoming[4].fileName || (incoming[4].videoBlob instanceof Blob))) {
                 incoming[4].videoUrl = '/api/video/' + encodeURIComponent(k);
               }
+            } else if (existing && existing[4] && (existing[4].videoUrl || existing[4].fileName || (existing[4].videoBlob instanceof Blob))) {
+              while (incoming.length < 5) incoming.push(null);
+              incoming[4] = existing[4];
             }
             STORE_CONFIG.productMedia[k] = incoming;
           }
@@ -1930,7 +1933,20 @@
 
         try {
           localStorage.setItem('dgpro_store_config', JSON.stringify(lightCopy));
-        } catch(quotaErr) {}
+        } catch(quotaErr) {
+          try {
+            const ultraLightMedia = {};
+            Object.keys(lightMedia).forEach(k => {
+              if (Array.isArray(lightMedia[k]) && lightMedia[k][4]) {
+                ultraLightMedia[k] = [null, null, null, null, lightMedia[k][4]];
+              }
+            });
+            localStorage.setItem('dgpro_store_config', JSON.stringify({
+              ...lightCopy,
+              productMedia: ultraLightMedia
+            }));
+          } catch(e2) {}
+        }
       } catch(e) {}
     }
 
@@ -2845,7 +2861,7 @@
             <div class="flex items-center gap-3">
               <video src="${previewSrc}" class="w-24 h-14 object-cover rounded-lg border border-emerald-400 bg-black flex-shrink-0" muted autoplay loop playsinline preload="metadata"></video>
               <div>
-                <strong class="text-emerald-400 block">✓ Active Video for "${prodTitle}"</strong>
+                <strong class="text-emerald-400 block">✓ Active Video Saved for "${prodTitle}"</strong>
                 <span class="text-[11px] text-slate-300 font-mono">${savedVid.fileName || 'video.mp4'} • ${savedVid.durationFormatted ? savedVid.durationFormatted + ' • ' : ''}Max 2 Min Preview</span>
               </div>
             </div>
@@ -2974,90 +2990,126 @@
       };
     }
 
+    const inFlightVideoUploadsByPid = {};
+    const lastUploadedVideoSigByPid = {};
+
     async function saveValidatedProductVideoForPid(pId, file) {
       if (!pId || !file) return false;
-      const check = await validateVideoFileMax2Min(file);
-      const prod = STORE_CONFIG.products.find(p => p.id === pId);
-      const defTitle = prod ? prod.title : 'Product';
-      const vidTitle = el('admMediaVideoTitle')?.value.trim() || `${defTitle} - Official Demo Video`;
+      const fileSig = `${pId}_${file.name}_${file.size}_${file.lastModified || 0}`;
 
-      const v2Payload = {
-        productId: pId,
-        explicitProductId: pId,
-        title: vidTitle,
-        fileName: file.name,
-        fileType: file.type || 'video/mp4',
-        durationSec: check.durationSec,
-        durationFormatted: check.durationFormatted,
-        blob: file,
-        updatedAt: Date.now()
-      };
-
-      await saveToIndexedDB('dgpro_v2_prod_video_' + pId, v2Payload);
-      await saveToIndexedDB('dgpro_product_video_' + pId, v2Payload);
-
-      if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
-      if (!Array.isArray(STORE_CONFIG.productMedia[pId])) STORE_CONFIG.productMedia[pId] = [];
-      let serverVideoUrl = `/api/video/${encodeURIComponent(pId)}?t=${Date.now()}`;
-      try {
-        const upRes = await fetch('/api/admin/upload-video?productId=' + encodeURIComponent(pId), {
-          method: 'POST',
-          headers: {
-            'Content-Type': file.type || 'video/mp4',
-            'X-Product-Id': pId,
-            'X-DGPRO-Admin-Sync': 'true',
-            'Authorization': 'Bearer dgpro_admin_sync'
-          },
-          body: file
-        });
-        if (upRes.ok) {
-          const upData = await upRes.json();
-          if (upData && upData.videoUrl) serverVideoUrl = upData.videoUrl;
-        }
-      } catch (upErr) {}
-
-      v2Payload.videoUrl = serverVideoUrl;
-      await saveToIndexedDB('dgpro_v2_prod_video_' + pId, v2Payload);
-      await saveToIndexedDB('dgpro_product_video_' + pId, v2Payload);
-
-      while (STORE_CONFIG.productMedia[pId].length < 5) STORE_CONFIG.productMedia[pId].push(null);
-      STORE_CONFIG.productMedia[pId][4] = {
-        type: 'video',
-        explicitProductId: pId,
-        title: vidTitle,
-        fileName: file.name,
-        durationFormatted: check.durationFormatted,
-        videoUrl: serverVideoUrl,
-        videoBlob: file
-      };
-      await saveAdminStore();
-
-      if (dgproSyncChannel) {
-        try {
-          dgproSyncChannel.postMessage({
-            type: 'DGPRO_V2_PRODUCT_VIDEO',
-            productId: pId,
-            payload: {
-              productId: pId,
-              explicitProductId: pId,
-              title: vidTitle,
-              fileName: file.name,
-              fileType: file.type || 'video/mp4',
-              durationFormatted: check.durationFormatted,
-              videoUrl: serverVideoUrl,
-              updatedAt: v2Payload.updatedAt
-            }
-          });
-        } catch (e) {}
+      // If this exact file is already uploading right now (e.g. from onchange), wait for that upload instead of starting a duplicate!
+      if (inFlightVideoUploadsByPid[pId]) {
+        return await inFlightVideoUploadsByPid[pId];
       }
-      await renderAdminProductVideoPreview(pId);
-      return true;
+
+      // If this exact file was already uploaded in this session and slot[4] has its server URL, just update title if changed
+      if (lastUploadedVideoSigByPid[pId] === fileSig && STORE_CONFIG.productMedia && STORE_CONFIG.productMedia[pId] && STORE_CONFIG.productMedia[pId][4] && STORE_CONFIG.productMedia[pId][4].videoUrl) {
+        const customTitle = el('admMediaVideoTitle')?.value.trim();
+        if (customTitle) {
+          STORE_CONFIG.productMedia[pId][4].title = customTitle;
+        }
+        await renderAdminProductVideoPreview(pId);
+        return true;
+      }
+
+      const uploadTask = (async () => {
+        const check = await validateVideoFileMax2Min(file);
+        const prod = STORE_CONFIG.products.find(p => p.id === pId);
+        const defTitle = prod ? prod.title : 'Product';
+        const vidTitle = el('admMediaVideoTitle')?.value.trim() || `${defTitle} - Official Demo Video`;
+        let serverVideoUrl = `/api/video/${encodeURIComponent(pId)}?t=${Date.now()}`;
+
+        const v2Payload = {
+          productId: pId,
+          explicitProductId: pId,
+          title: vidTitle,
+          fileName: file.name,
+          fileType: file.type || 'video/mp4',
+          durationSec: check.durationSec,
+          durationFormatted: check.durationFormatted,
+          videoUrl: serverVideoUrl,
+          blob: file,
+          updatedAt: Date.now()
+        };
+
+        // 1. Populate STORE_CONFIG.productMedia[pId][4] IMMEDIATELY so clicking Save never sees an empty slot[4]!
+        if (!STORE_CONFIG.productMedia) STORE_CONFIG.productMedia = {};
+        if (!Array.isArray(STORE_CONFIG.productMedia[pId])) STORE_CONFIG.productMedia[pId] = [null, null, null, null, null];
+        while (STORE_CONFIG.productMedia[pId].length < 5) STORE_CONFIG.productMedia[pId].push(null);
+        STORE_CONFIG.productMedia[pId][4] = {
+          type: 'video',
+          explicitProductId: pId,
+          title: vidTitle,
+          fileName: file.name,
+          durationFormatted: check.durationFormatted,
+          videoUrl: serverVideoUrl,
+          videoBlob: file
+        };
+
+        await saveToIndexedDB('dgpro_v2_prod_video_' + pId, v2Payload);
+        await saveToIndexedDB('dgpro_product_video_' + pId, v2Payload);
+        await renderAdminProductVideoPreview(pId);
+
+        // 2. Upload binary video to central server
+        try {
+          const upRes = await fetch('/api/admin/upload-video?productId=' + encodeURIComponent(pId), {
+            method: 'POST',
+            headers: {
+              'Content-Type': file.type || 'video/mp4',
+              'X-Product-Id': pId,
+              'X-DGPRO-Admin-Sync': 'true',
+              'Authorization': 'Bearer dgpro_admin_sync'
+            },
+            body: file
+          });
+          if (upRes.ok) {
+            const upData = await upRes.json();
+            if (upData && upData.videoUrl) serverVideoUrl = upData.videoUrl;
+            lastUploadedVideoSigByPid[pId] = fileSig;
+          }
+        } catch (upErr) {}
+
+        v2Payload.videoUrl = serverVideoUrl;
+        STORE_CONFIG.productMedia[pId][4].videoUrl = serverVideoUrl;
+        await saveToIndexedDB('dgpro_v2_prod_video_' + pId, v2Payload);
+        await saveToIndexedDB('dgpro_product_video_' + pId, v2Payload);
+        await saveAdminStore();
+
+        if (dgproSyncChannel) {
+          try {
+            dgproSyncChannel.postMessage({
+              type: 'DGPRO_V2_PRODUCT_VIDEO',
+              productId: pId,
+              payload: {
+                productId: pId,
+                explicitProductId: pId,
+                title: vidTitle,
+                fileName: file.name,
+                fileType: file.type || 'video/mp4',
+                durationFormatted: check.durationFormatted,
+                videoUrl: serverVideoUrl,
+                updatedAt: v2Payload.updatedAt
+              }
+            });
+          } catch (e) {}
+        }
+        await renderAdminProductVideoPreview(pId);
+        return true;
+      })();
+
+      inFlightVideoUploadsByPid[pId] = uploadTask;
+      try {
+        return await uploadTask;
+      } finally {
+        delete inFlightVideoUploadsByPid[pId];
+      }
     }
 
     if (el('admClearProductVideoBtn')) {
       el('admClearProductVideoBtn').onclick = async () => {
         const pId = admMediaProductSelector ? admMediaProductSelector.value : '';
         if (!pId) return;
+        delete lastUploadedVideoSigByPid[pId];
         await saveToIndexedDB('dgpro_v2_prod_video_' + pId, null);
         await saveToIndexedDB('dgpro_product_video_' + pId, null);
         try { localStorage.removeItem('dgpro_product_video_' + pId); } catch(e){}
@@ -3093,6 +3145,7 @@
         for (const p of prods) {
           if (!p || !p.id) continue;
           const pid = p.id;
+          if (inFlightVideoUploadsByPid[pid]) continue;
           let rec = await loadFromIndexedDB('dgpro_v2_prod_video_' + pid);
           if (!rec || !isValidVideoBlob(rec.blob)) {
             rec = await loadFromIndexedDB('dgpro_product_video_' + pid);
@@ -3197,10 +3250,12 @@
           return;
         }
 
+        // Wait for any in-flight video upload or upload newly chosen video without clearing the file input!
         const vidFileObj = el('admMediaVideoFile') && el('admMediaVideoFile').files ? el('admMediaVideoFile').files[0] : null;
-        if (vidFileObj) {
+        if (inFlightVideoUploadsByPid[pId]) {
+          await inFlightVideoUploadsByPid[pId];
+        } else if (vidFileObj) {
           await saveValidatedProductVideoForPid(pId, vidFileObj);
-          if (el('admMediaVideoFile')) el('admMediaVideoFile').value = "";
         }
 
         const prevMedia = (STORE_CONFIG.productMedia && STORE_CONFIG.productMedia[pId]) ? STORE_CONFIG.productMedia[pId] : [];
@@ -3278,13 +3333,10 @@
           }
         }
 
-        pendingPhotoDataUrls = ["", "", "", ""];
-        ['admMediaFile1','admMediaFile2','admMediaFile3','admMediaFile4'].forEach(fid => {
-          if (el(fid)) el(fid).value = "";
-        });
-
+        // Keep file inputs visible after saving (do NOT reset .value = "" to "No file chosen" after Save!)
         await saveAdminStore();
         renderAdminPhotoPreviews(pId);
+        await renderAdminProductVideoPreview(pId);
         showToast("✓ Product Photos & Video saved and synced live to Storefront!");
       } catch (err) {
         showToast("Save Error: " + (err.message || err), true);
