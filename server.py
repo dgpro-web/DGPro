@@ -1001,16 +1001,7 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
         }}
       }};
     }}
-    const origSaveVid = window.saveValidatedProductVideoForPid;
-    if (typeof origSaveVid === 'function') {{
-      window.saveValidatedProductVideoForPid = async function(pId, file) {{
-        const ok = await origSaveVid.apply(this, arguments);
-        if (ok && pId && file) {{
-          await window.uploadProductVideoBlobToServer(pId, file);
-        }}
-        return ok;
-      }};
-    }}
+    // Video upload is handled directly inside saveValidatedProductVideoForPid with deduplication
     setTimeout(async function() {{
       try {{
         if (typeof STORE_CONFIG !== 'undefined') {{
