@@ -1273,6 +1273,10 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
     window.addEventListener('focus', syncStorefrontWithServer);
     setInterval(syncStorefrontWithServer, 20000);
   }}
+  // 24/7 Render Keep-Alive Heartbeat from any open browser tab (every 3 minutes)
+  setInterval(function() {{
+    fetch('/api/health?keepalive=' + Date.now(), {{ cache: 'no-store' }}).catch(function() {{}});
+  }}, 180000);
 }})();
 </script>
 """
@@ -2300,7 +2304,43 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+
+def start_render_keep_alive_daemon():
+    import threading
+
+    def _keep_alive_worker():
+        time.sleep(15)
+        while True:
+            targets = set()
+            render_ext = os.environ.get('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
+            custom_url = os.environ.get('KEEP_ALIVE_URL', 'https://dgpro.site').strip().rstrip('/')
+            if render_ext:
+                targets.add(f"{render_ext}/api/health")
+            if custom_url:
+                targets.add(f"{custom_url}/api/health")
+            for base_target in targets:
+                ping_url = f"{base_target}?keepalive={int(time.time())}"
+                try:
+                    req = urllib.request.Request(
+                        ping_url,
+                        headers={
+                            "User-Agent": "DGPRO-Render-KeepAlive/1.0",
+                            "Cache-Control": "no-cache"
+                        }
+                    )
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        _ = resp.read()
+                except Exception:
+                    pass
+            # Ping every 4 minutes (240s) so Render's 15-minute idle timer never triggers
+            time.sleep(240)
+
+    t = threading.Thread(target=_keep_alive_worker, name="RenderKeepAliveDaemon", daemon=True)
+    t.start()
+
+
 def run():
+    start_render_keep_alive_daemon()
     with ThreadingHTTPServer(("", PORT), DGPROHandler) as httpd:
         print(f"====================================================")
         print(f"🚀 DGPRO Razorpay Backend Server running on http://localhost:{PORT}")
