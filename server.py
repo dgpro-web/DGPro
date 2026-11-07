@@ -685,10 +685,55 @@ MIME_TYPES = {
 }
 
 
+def enrich_store_config_with_server_videos(cfg_input):
+    try:
+        cfg = json.loads(json.dumps(cfg_input if isinstance(cfg_input, dict) else {}))
+    except Exception:
+        cfg = {}
+    pm = cfg.get("productMedia")
+    if not isinstance(pm, dict):
+        pm = {}
+    # Clean any dead browser-local blob: or data: video URLs first
+    for k_pid, slots in list(pm.items()):
+        if isinstance(slots, list) and len(slots) > 4 and isinstance(slots[4], dict):
+            v_url = str(slots[4].get("videoUrl") or "").strip()
+            if v_url.startswith("blob:") or v_url.startswith("data:"):
+                slots[4]["videoUrl"] = ""
+    # Attach permanent /api/video/<safe_pid> for every video file present in VIDEOS_DIR
+    if os.path.isdir(VIDEOS_DIR):
+        for f_name in os.listdir(VIDEOS_DIR):
+            if f_name.endswith('.mp4'):
+                safe_pid = f_name[:-4]
+                vid_full = os.path.join(VIDEOS_DIR, f_name)
+                if safe_pid and os.path.isfile(vid_full) and os.path.getsize(vid_full) > 0:
+                    slots = pm.get(safe_pid)
+                    if not isinstance(slots, list):
+                        slots = [None, None, None, None, None]
+                    while len(slots) < 5:
+                        slots.append(None)
+                    if not isinstance(slots[4], dict):
+                        slots[4] = {
+                            "type": "video",
+                            "explicitProductId": safe_pid,
+                            "title": "Official Video Demo",
+                            "fileName": f_name
+                        }
+                    existing_vurl = str(slots[4].get("videoUrl") or "").strip()
+                    if not existing_vurl or existing_vurl.startswith("/api/video/") or existing_vurl.startswith("blob:") or existing_vurl.startswith("data:"):
+                        slots[4]["videoUrl"] = f"/api/video/{safe_pid}"
+                    if not slots[4].get("fileName"):
+                        slots[4]["fileName"] = f_name
+                    slots[4]["explicitProductId"] = safe_pid
+                    pm[safe_pid] = slots
+    cfg["productMedia"] = pm
+    return cfg
+
+
 def inject_cloud_sync_into_html(html_bytes, is_admin=False):
     try:
         html_str = html_bytes.decode('utf-8')
-        server_cfg_json = json.dumps(db.get("storeConfig", {}), ensure_ascii=False)
+        enriched_cfg = enrich_store_config_with_server_videos(db.get("storeConfig", {}))
+        server_cfg_json = json.dumps(enriched_cfg, ensure_ascii=False)
         sync_script = f"""
 <!-- DGPRO MOBILE RESPONSIVE & ANTI-OVERFLOW ENGINE -->
 <style id="dgpro-mobile-responsive-fix">
@@ -805,24 +850,59 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
   window.__DGPRO_SERVER_STORE_CONFIG__ = {server_cfg_json};
   window.__LAST_APPLIED_SERVER_TS__ = 0;
   const IS_ADMIN_PAGE = { 'true' if is_admin else 'false' };
-  const PREWARMED_VIDEO_NODES = {{}};
   const UPLOADED_VIDEOS_TRACKER = new Set();
+
+  function isUsableRemoteOrSessionVideoUrl(u) {{
+    if (!u || typeof u !== 'string') return false;
+    const clean = u.trim();
+    if (!clean) return false;
+    if (clean.startsWith('blob:')) {{
+      return (typeof SESSION_VALID_BLOB_URLS !== 'undefined' && SESSION_VALID_BLOB_URLS.has(clean));
+    }}
+    if (clean.startsWith('data:')) return false;
+    return true;
+  }}
 
   function buildCleanConfigPayload(cfgObj) {{
     if (!cfgObj) return null;
     try {{
+      const rawPm = cfgObj.productMedia || (typeof PRODUCT_MEDIA !== 'undefined' ? PRODUCT_MEDIA : {{}});
+      const cleanPm = {{}};
+      Object.keys(rawPm || {{}}).forEach(function(pid) {{
+        const arr = rawPm[pid];
+        if (Array.isArray(arr)) {{
+          cleanPm[pid] = arr.map(function(slot, idx) {{
+            if (idx === 4) {{
+              if (!slot) return null;
+              let vUrl = (slot.videoUrl && typeof slot.videoUrl === 'string' && !slot.videoUrl.startsWith('blob:') && !slot.videoUrl.startsWith('data:'))
+                ? slot.videoUrl.trim()
+                : '';
+              const hasBlob = (typeof Blob !== 'undefined' && (slot.videoBlob instanceof Blob) && slot.videoBlob.size > 0);
+              if (!vUrl && (slot.fileName || hasBlob)) {{
+                vUrl = '/api/video/' + encodeURIComponent(pid);
+              }}
+              return {{
+                type: 'video',
+                explicitProductId: pid,
+                title: slot.title || 'Official Video Demo',
+                fileName: slot.fileName || '',
+                durationFormatted: slot.durationFormatted || '',
+                videoUrl: vUrl,
+                fullVideoUrl: slot.fullVideoUrl || ''
+              }};
+            }}
+            return slot;
+          }});
+        }}
+      }});
       return JSON.stringify({{
         categories: cfgObj.categories || (typeof CATEGORIES !== 'undefined' ? CATEGORIES : []),
         products: cfgObj.products || (typeof PRODUCTS !== 'undefined' ? PRODUCTS : []),
         orderBumps: cfgObj.orderBumps || (typeof ORDER_BUMPS !== 'undefined' ? ORDER_BUMPS : {{}}),
         coupons: cfgObj.coupons || (typeof COUPONS !== 'undefined' ? COUPONS : {{}}),
         siteBanners: cfgObj.siteBanners || (typeof SITE_BANNERS !== 'undefined' ? SITE_BANNERS : {{}}),
-        productMedia: cfgObj.productMedia || (typeof PRODUCT_MEDIA !== 'undefined' ? PRODUCT_MEDIA : {{}}),
+        productMedia: cleanPm,
         lastUpdated: cfgObj.lastUpdated || Date.now()
-      }}, function(key, val) {{
-        if (key === 'videoBlob' || key === 'blob') return undefined;
-        if (typeof Blob !== 'undefined' && val instanceof Blob) return undefined;
-        return val;
       }});
     }} catch (e) {{
       return null;
@@ -837,14 +917,15 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
         headers: {{
           'Content-Type': blobObj.type || 'video/mp4',
           'X-Product-Id': pid,
-          'X-DGPRO-Admin-Sync': 'true'
+          'X-DGPRO-Admin-Sync': 'true',
+          'Authorization': 'Bearer dgpro_admin_sync'
         }},
         body: blobObj
       }});
       if (res.ok) {{
         const data = await res.json();
         UPLOADED_VIDEOS_TRACKER.add(pid);
-        return data.videoUrl || ('/api/video/' + pid);
+        return data.videoUrl || ('/api/video/' + encodeURIComponent(pid));
       }}
     }} catch (e) {{
       console.warn('Video cloud upload warning:', e);
@@ -856,19 +937,25 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
     if (!Array.isArray(productsList) || typeof loadFromIndexedDB !== 'function') return;
     for (const p of productsList) {{
       const pid = p && p.id;
-      if (!pid || UPLOADED_VIDEOS_TRACKER.has(pid)) continue;
-      // Always attempt sync for local Blobs to guarantee server has the binary
-      const existingServerUrl = mediaMap && mediaMap[pid] && mediaMap[pid][4] && mediaMap[pid][4].videoUrl;
+      if (!pid) continue;
       try {{
         let rec = await loadFromIndexedDB('dgpro_v2_prod_video_' + pid);
         if (!rec || !(rec.blob instanceof Blob)) {{
           rec = await loadFromIndexedDB('dgpro_product_video_' + pid);
         }}
-        const b = (rec && (rec.blob instanceof Blob)) ? rec.blob : (mediaMap && mediaMap[pid] && mediaMap[pid][4] && (mediaMap[pid][4].videoBlob instanceof Blob) ? mediaMap[pid][4].videoBlob : null);
-        if (b && b.size > 0) {{
+        const b = (rec && (rec.blob instanceof Blob))
+          ? rec.blob
+          : (mediaMap && mediaMap[pid] && mediaMap[pid][4] && (mediaMap[pid][4].videoBlob instanceof Blob) ? mediaMap[pid][4].videoBlob : null);
+        if (b && b.size > 0 && !UPLOADED_VIDEOS_TRACKER.has(pid)) {{
           const uploadedUrl = await window.uploadProductVideoBlobToServer(pid, b);
-          if (uploadedUrl && mediaMap && mediaMap[pid] && mediaMap[pid][4]) {{
+          if (uploadedUrl && mediaMap) {{
+            if (!Array.isArray(mediaMap[pid])) mediaMap[pid] = [null, null, null, null, null];
+            while (mediaMap[pid].length < 5) mediaMap[pid].push(null);
+            if (!mediaMap[pid][4]) mediaMap[pid][4] = {{ type: 'video', explicitProductId: pid }};
             mediaMap[pid][4].videoUrl = uploadedUrl;
+            if (rec && rec.fileName && !mediaMap[pid][4].fileName) mediaMap[pid][4].fileName = rec.fileName;
+            if (rec && rec.title && !mediaMap[pid][4].title) mediaMap[pid][4].title = rec.title;
+            if (rec && rec.durationFormatted && !mediaMap[pid][4].durationFormatted) mediaMap[pid][4].durationFormatted = rec.durationFormatted;
           }}
         }}
       }} catch (e) {{}}
@@ -879,6 +966,7 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
     try {{
       const targetCfg = cfgSource || (typeof STORE_CONFIG !== 'undefined' ? STORE_CONFIG : null);
       if (!targetCfg) return false;
+      await syncAllLocalVideosToServer(targetCfg.products || [], targetCfg.productMedia || {{}});
       const payloadStr = buildCleanConfigPayload(targetCfg);
       if (!payloadStr) return false;
       const res = await fetch('/api/admin/save-store-data', {{
@@ -892,7 +980,6 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       }});
       if (res.ok) {{
         window.__DGPRO_SERVER_STORE_CONFIG__ = JSON.parse(payloadStr);
-        syncAllLocalVideosToServer(targetCfg.products || [], targetCfg.productMedia || {{}});
         if (showToastConfirm && typeof showToast === 'function') {{
           showToast("☁️ Synced to Live Server! All browsers & phones now show these products.");
         }}
@@ -910,7 +997,7 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       window.saveAdminStore = async function() {{
         try {{ await origSaveAdmin.apply(this, arguments); }} catch (e) {{}}
         if (typeof STORE_CONFIG !== 'undefined') {{
-          await window.pushStoreDataToCentralServer(STORE_CONFIG, true);
+          await window.pushStoreDataToCentralServer(STORE_CONFIG, false);
         }}
       }};
     }}
@@ -926,6 +1013,9 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
     }}
     setTimeout(async function() {{
       try {{
+        if (typeof STORE_CONFIG !== 'undefined') {{
+          await syncAllLocalVideosToServer(STORE_CONFIG.products || [], STORE_CONFIG.productMedia || {{}});
+        }}
         const res = await fetch('/api/store-data?t=' + Date.now(), {{ cache: 'no-store' }});
         const srvCfg = res.ok ? await res.json() : {{}};
         const srvTs = Number(srvCfg && srvCfg.lastUpdated) || 0;
@@ -934,31 +1024,30 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
 
         if ((!srvCfg || !Array.isArray(srvCfg.products) || srvCfg.products.length === 0) && typeof STORE_CONFIG !== 'undefined') {{
           await window.pushStoreDataToCentralServer(STORE_CONFIG, false);
-        }} else if (hasLocalEdits && localTs >= srvTs && typeof STORE_CONFIG !== 'undefined') {{
-          await window.pushStoreDataToCentralServer(STORE_CONFIG, false);
         }} else if (srvCfg && Array.isArray(srvCfg.products) && srvCfg.products.length > 0 && typeof applyParsedConfig === 'function') {{
-          applyParsedConfig(srvCfg);
-          if (typeof renderDashboard === 'function') renderDashboard();
-          if (typeof renderProductSelector === 'function') renderProductSelector();
-          if (typeof renderCategoriesList === 'function') renderCategoriesList();
-          if (typeof currentEditingId !== 'undefined' && currentEditingId && typeof loadProductToEditor === 'function') {{
-            loadProductToEditor(currentEditingId);
+          if (!hasLocalEdits || srvTs >= localTs) {{
+            applyParsedConfig(srvCfg);
+            if (typeof renderDashboard === 'function') renderDashboard();
+            if (typeof renderProductSelector === 'function') renderProductSelector();
+            if (typeof renderCategoriesList === 'function') renderCategoriesList();
+            if (typeof currentEditingId !== 'undefined' && currentEditingId && typeof loadProductToEditor === 'function') {{
+              loadProductToEditor(currentEditingId);
+            }}
+          }} else {{
+            await window.pushStoreDataToCentralServer(STORE_CONFIG, false);
           }}
         }}
-        if (typeof STORE_CONFIG !== 'undefined') {{
-          syncAllLocalVideosToServer(STORE_CONFIG.products || [], STORE_CONFIG.productMedia || {{}});
-        }}
       }} catch (e) {{}}
-    }}, 700);
+    }}, 1500);
   }} else {{
-    // ================= INSTANT 0MS VIDEO PRELOADER & PLAYER FOR STOREFRONT =================
+    // ================= MOBILE & CROSS-BROWSER RELIABLE VIDEO PLAYER FOR STOREFRONT =================
     function getImmediateSyncVideoUrl(pid) {{
       if (!pid) return '';
-      if (typeof PRODUCT_V2_VIDEO_CACHE !== 'undefined' && PRODUCT_V2_VIDEO_CACHE[pid] && PRODUCT_V2_VIDEO_CACHE[pid].objectUrl) {{
-        return PRODUCT_V2_VIDEO_CACHE[pid].objectUrl;
+      if (typeof PRODUCT_V2_VIDEO_CACHE !== 'undefined' && PRODUCT_V2_VIDEO_CACHE[pid] && isUsableRemoteOrSessionVideoUrl(PRODUCT_V2_VIDEO_CACHE[pid].objectUrl)) {{
+        return PRODUCT_V2_VIDEO_CACHE[pid].objectUrl.trim();
       }}
-      if (typeof VIDEO_OBJECT_URL_CACHE !== 'undefined' && VIDEO_OBJECT_URL_CACHE[pid] && VIDEO_OBJECT_URL_CACHE[pid].url) {{
-        return VIDEO_OBJECT_URL_CACHE[pid].url;
+      if (typeof VIDEO_OBJECT_URL_CACHE !== 'undefined' && VIDEO_OBJECT_URL_CACHE[pid] && isUsableRemoteOrSessionVideoUrl(VIDEO_OBJECT_URL_CACHE[pid].url)) {{
+        return VIDEO_OBJECT_URL_CACHE[pid].url.trim();
       }}
       if (typeof PRODUCT_MEDIA !== 'undefined' && PRODUCT_MEDIA[pid] && PRODUCT_MEDIA[pid][4]) {{
         const slot4 = PRODUCT_MEDIA[pid][4];
@@ -966,42 +1055,25 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
           const bUrl = getCachedBlobUrl(slot4.videoBlob, pid);
           if (bUrl) return bUrl;
         }}
-        if (slot4.videoUrl && typeof slot4.videoUrl === 'string' && slot4.videoUrl.trim() !== '') {{
+        if (isUsableRemoteOrSessionVideoUrl(slot4.videoUrl)) {{
           return slot4.videoUrl.trim();
         }}
       }}
       if (window.SERVER_AUTHORITATIVE_CONFIG && window.SERVER_AUTHORITATIVE_CONFIG.productMedia && window.SERVER_AUTHORITATIVE_CONFIG.productMedia[pid] && window.SERVER_AUTHORITATIVE_CONFIG.productMedia[pid][4]) {{
         const sSlot4 = window.SERVER_AUTHORITATIVE_CONFIG.productMedia[pid][4];
-        if (sSlot4 && sSlot4.videoUrl) return sSlot4.videoUrl;
+        if (sSlot4 && isUsableRemoteOrSessionVideoUrl(sSlot4.videoUrl)) {{
+          return sSlot4.videoUrl.trim();
+        }}
+      }}
+      if (window.__DGPRO_SERVER_STORE_CONFIG__ && window.__DGPRO_SERVER_STORE_CONFIG__.productMedia && window.__DGPRO_SERVER_STORE_CONFIG__.productMedia[pid] && window.__DGPRO_SERVER_STORE_CONFIG__.productMedia[pid][4]) {{
+        const initSlot4 = window.__DGPRO_SERVER_STORE_CONFIG__.productMedia[pid][4];
+        if (initSlot4 && isUsableRemoteOrSessionVideoUrl(initSlot4.videoUrl)) {{
+          return initSlot4.videoUrl.trim();
+        }}
       }}
       return '';
     }}
 
-    function prebufferProductVideoNode(pid, srcUrl) {{
-      if (!pid || !srcUrl) return null;
-      let existingNode = PREWARMED_VIDEO_NODES[pid];
-      if (existingNode && existingNode.dataset.loadedSrc === srcUrl) {{
-        return existingNode;
-      }}
-      try {{
-        const vid = document.createElement('video');
-        vid.src = srcUrl;
-        vid.muted = true;
-        vid.loop = true;
-        vid.playsInline = true;
-        vid.controls = true;
-        vid.preload = 'auto';
-        vid.className = 'w-full h-full object-contain bg-black';
-        vid.dataset.loadedSrc = srcUrl;
-        vid.load();
-        PREWARMED_VIDEO_NODES[pid] = vid;
-        return vid;
-      }} catch (e) {{
-        return null;
-      }}
-    }}
-
-    // Upgrade selectProductMediaSlot so Video Slot mounts in 0ms without async delay or race condition cancellation!
     window.selectProductMediaSlot = async function(slot) {{
       const viewer = document.getElementById('pdMainMediaViewer');
       const badge = document.getElementById('pdMediaSlotBadge');
@@ -1020,16 +1092,16 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       const pid = slot.productId || (typeof currentDetailProductId !== 'undefined' ? currentDetailProductId : '');
       if (!pid) return;
 
-      // 1. Check synchronous 0ms sources first
-      let fastUrl = getImmediateSyncVideoUrl(pid);
+      // 1. Check synchronous 0ms sources first (preserves Mobile user tap gesture!)
+      let fastUrl = isUsableRemoteOrSessionVideoUrl(slot.videoUrl) ? slot.videoUrl.trim() : getImmediateSyncVideoUrl(pid);
       if (fastUrl) {{
         if (typeof mountPlayableVideoInViewer === 'function') {{
-          mountPlayableVideoInViewer(viewer, fastUrl);
+          mountPlayableVideoInViewer(viewer, fastUrl, slot);
         }}
         return;
       }}
 
-      // 2. Show instant player shell immediately (0ms visual feedback!) while fetching from IndexedDB or Server
+      // 2. Show loading indicator while checking IndexedDB or Server /api/video/<pid>
       viewer.innerHTML = `
         <div class="w-full h-full relative bg-black flex flex-col items-center justify-center overflow-hidden select-none text-white">
           <div class="w-10 h-10 border-3 border-brand-gold border-t-transparent rounded-full animate-spin mb-2"></div>
@@ -1041,13 +1113,12 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       if (typeof getOrLoadProductVideoUrl === 'function') {{
         try {{ asyncUrl = await getOrLoadProductVideoUrl(pid); }} catch (e) {{}}
       }}
-      if (!asyncUrl) {{
+      if (!isUsableRemoteOrSessionVideoUrl(asyncUrl)) {{
         asyncUrl = getImmediateSyncVideoUrl(pid);
       }}
-      // Fallback: check if server has /api/video/<pid>
-      if (!asyncUrl) {{
+      if (!isUsableRemoteOrSessionVideoUrl(asyncUrl)) {{
         try {{
-          const headRes = await fetch('/api/video/' + encodeURIComponent(pid), {{ method: 'HEAD' }});
+          const headRes = await fetch('/api/video/' + encodeURIComponent(pid), {{ method: 'HEAD', cache: 'no-store' }});
           if (headRes.ok || headRes.status === 206) {{
             asyncUrl = '/api/video/' + encodeURIComponent(pid);
             if (typeof PRODUCT_V2_VIDEO_CACHE !== 'undefined') {{
@@ -1057,12 +1128,10 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
         }} catch (e) {{}}
       }}
 
-      // Mount immediately if user is still viewing video slot
       if (typeof currentDetailMediaSlotIdx !== 'undefined' && currentDetailMediaSlotIdx !== 4) return;
-      if (asyncUrl) {{
-        prebufferProductVideoNode(pid, asyncUrl);
+      if (isUsableRemoteOrSessionVideoUrl(asyncUrl)) {{
         if (typeof mountPlayableVideoInViewer === 'function') {{
-          mountPlayableVideoInViewer(viewer, asyncUrl);
+          mountPlayableVideoInViewer(viewer, asyncUrl, slot);
         }}
       }} else {{
         viewer.innerHTML = `
@@ -1074,29 +1143,6 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
         `;
       }}
     }};
-
-    // Also hook openProductDetails so as soon as a user clicks a product card, its video is pre-buffered in 0ms!
-    const origOpenProductDetails = window.openProductDetails;
-    if (typeof origOpenProductDetails === 'function') {{
-      window.openProductDetails = function(productId, isBackgroundSync) {{
-        origOpenProductDetails.apply(this, arguments);
-        if (productId) {{
-          const syncU = getImmediateSyncVideoUrl(productId);
-          if (syncU) {{
-            prebufferProductVideoNode(productId, syncU);
-            if (typeof prewarmVideoUrlInMemory === 'function') prewarmVideoUrlInMemory(syncU);
-          }} else if (typeof getOrLoadProductVideoUrl === 'function') {{
-            getOrLoadProductVideoUrl(productId).then(u => {{
-              const finalU = u || getImmediateSyncVideoUrl(productId);
-              if (finalU) {{
-                prebufferProductVideoNode(productId, finalU);
-                if (typeof prewarmVideoUrlInMemory === 'function') prewarmVideoUrlInMemory(finalU);
-              }}
-            }}).catch(() => {{}});
-          }}
-        }}
-      }};
-    }}
 
     function applyAuthoritativeServerConfig(srvCfg) {{
       if (!srvCfg || !Array.isArray(srvCfg.products) || srvCfg.products.length === 0) return false;
@@ -1115,36 +1161,84 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       if (typeof ORDER_BUMPS !== 'undefined' && srvCfg.orderBumps) ORDER_BUMPS = srvCfg.orderBumps;
       if (typeof COUPONS !== 'undefined' && srvCfg.coupons) COUPONS = srvCfg.coupons;
 
-      // Pre-populate PRODUCT_V2_VIDEO_CACHE from server videoUrls so videos play in 0ms!
+      // Ensure PRODUCT_MEDIA and PRODUCT_V2_VIDEO_CACHE always keep the server videoUrl on Mobile & all Browsers!
       if (srvCfg.productMedia && typeof srvCfg.productMedia === 'object') {{
-        Object.keys(srvCfg.productMedia).forEach(pid => {{
+        Object.keys(srvCfg.productMedia).forEach(function(pid) {{
           const s4 = srvCfg.productMedia[pid] && srvCfg.productMedia[pid][4];
-          if (s4 && s4.videoUrl && typeof PRODUCT_V2_VIDEO_CACHE !== 'undefined') {{
-            if (!PRODUCT_V2_VIDEO_CACHE[pid] || !PRODUCT_V2_VIDEO_CACHE[pid].blob) {{
-              PRODUCT_V2_VIDEO_CACHE[pid] = {{
-                productId: pid,
-                objectUrl: s4.videoUrl,
-                title: s4.title || 'Video Demo',
-                durationFormatted: s4.durationFormatted || ''
-              }};
+          if (s4 && isUsableRemoteOrSessionVideoUrl(s4.videoUrl)) {{
+            const cleanVUrl = s4.videoUrl.trim();
+            if (typeof PRODUCT_MEDIA !== 'undefined') {{
+              if (!Array.isArray(PRODUCT_MEDIA[pid])) PRODUCT_MEDIA[pid] = [null, null, null, null, null];
+              while (PRODUCT_MEDIA[pid].length < 5) PRODUCT_MEDIA[pid].push(null);
+              if (!PRODUCT_MEDIA[pid][4]) PRODUCT_MEDIA[pid][4] = {{ type: 'video', explicitProductId: pid }};
+              PRODUCT_MEDIA[pid][4].videoUrl = cleanVUrl;
+              PRODUCT_MEDIA[pid][4].title = s4.title || PRODUCT_MEDIA[pid][4].title || 'Video Demo';
+              PRODUCT_MEDIA[pid][4].fileName = s4.fileName || PRODUCT_MEDIA[pid][4].fileName || 'video.mp4';
+              PRODUCT_MEDIA[pid][4].durationFormatted = s4.durationFormatted || PRODUCT_MEDIA[pid][4].durationFormatted || '';
+              if (s4.fullVideoUrl) PRODUCT_MEDIA[pid][4].fullVideoUrl = s4.fullVideoUrl;
+            }}
+            if (typeof PRODUCT_V2_VIDEO_CACHE !== 'undefined') {{
+              if (!PRODUCT_V2_VIDEO_CACHE[pid] || !PRODUCT_V2_VIDEO_CACHE[pid].blob) {{
+                PRODUCT_V2_VIDEO_CACHE[pid] = {{
+                  productId: pid,
+                  objectUrl: cleanVUrl,
+                  title: s4.title || 'Video Demo',
+                  fileName: s4.fileName || 'video.mp4',
+                  durationFormatted: s4.durationFormatted || '',
+                  fullVideoUrl: s4.fullVideoUrl || ''
+                }};
+              }}
             }}
           }}
         }});
       }}
 
-      try {{ localStorage.setItem('dgpro_products', JSON.stringify(srvCfg.products)); }} catch(e) {{}}
+      // Mobile Quota-Safe localStorage caching (strips heavy base64 images from localStorage so Mobile 5MB limit never breaks video!)
+      try {{
+        const mobileSafeProds = (srvCfg.products || []).map(function(p) {{
+          const copy = Object.assign({{}}, p);
+          if (copy.bannerImage && copy.bannerImage.length > 2048) copy.bannerImage = '';
+          return copy;
+        }});
+        localStorage.setItem('dgpro_products', JSON.stringify(mobileSafeProds));
+      }} catch(e) {{}}
       try {{ if (srvCfg.categories) localStorage.setItem('dgpro_categories', JSON.stringify(srvCfg.categories)); }} catch(e) {{}}
       try {{ if (srvCfg.orderBumps) localStorage.setItem('dgpro_order_bumps', JSON.stringify(srvCfg.orderBumps)); }} catch(e) {{}}
       try {{ if (srvCfg.coupons) localStorage.setItem('dgpro_coupons', JSON.stringify(srvCfg.coupons)); }} catch(e) {{}}
-      try {{ localStorage.setItem('dgpro_store_config', JSON.stringify(srvCfg)); }} catch(e) {{}}
+      try {{
+        const lightPm = {{}};
+        Object.keys(srvCfg.productMedia || {{}}).forEach(function(k) {{
+          const slots = srvCfg.productMedia[k];
+          if (Array.isArray(slots) && slots[4]) {{
+            lightPm[k] = [null, null, null, null, {{
+              type: 'video',
+              explicitProductId: k,
+              title: slots[4].title || 'Video Demo',
+              fileName: slots[4].fileName || '',
+              durationFormatted: slots[4].durationFormatted || '',
+              videoUrl: isUsableRemoteOrSessionVideoUrl(slots[4].videoUrl) ? slots[4].videoUrl.trim() : '',
+              fullVideoUrl: slots[4].fullVideoUrl || ''
+            }}];
+          }}
+        }});
+        localStorage.setItem('dgpro_store_config', JSON.stringify({{
+          categories: srvCfg.categories,
+          products: (srvCfg.products || []).map(function(p) {{
+            const c = Object.assign({{}}, p);
+            if (c.bannerImage && c.bannerImage.length > 2048) c.bannerImage = '';
+            return c;
+          }}),
+          productMedia: lightPm,
+          orderBumps: srvCfg.orderBumps,
+          coupons: srvCfg.coupons,
+          lastUpdated: srvCfg.lastUpdated
+        }}));
+      }} catch(e) {{}}
 
       if (isNewChange) {{
         if (typeof renderCategories === 'function') renderCategories();
         if (typeof renderCatalog === 'function') renderCatalog();
         if (typeof updateDynamicPromoBanners === 'function') updateDynamicPromoBanners();
-      }}
-      if (typeof loadAllV2ProductVideosFromIndexedDB === 'function') {{
-        loadAllV2ProductVideosFromIndexedDB();
       }}
       return true;
     }}
@@ -1154,67 +1248,28 @@ def inject_cloud_sync_into_html(html_bytes, is_admin=False):
       window.loadStoreConfig = function() {{
         origLoadStoreConfig.apply(this, arguments);
         if (window.SERVER_AUTHORITATIVE_CONFIG && Array.isArray(window.SERVER_AUTHORITATIVE_CONFIG.products) && window.SERVER_AUTHORITATIVE_CONFIG.products.length > 0) {{
-          if (typeof applyConfigObject === 'function') {{
-            applyConfigObject(window.SERVER_AUTHORITATIVE_CONFIG, true);
-          }}
-          PRODUCTS = window.SERVER_AUTHORITATIVE_CONFIG.products;
-          if (Array.isArray(window.SERVER_AUTHORITATIVE_CONFIG.categories) && window.SERVER_AUTHORITATIVE_CONFIG.categories.length > 0) {{
-            CATEGORIES = window.SERVER_AUTHORITATIVE_CONFIG.categories;
-          }}
+          applyAuthoritativeServerConfig(window.SERVER_AUTHORITATIVE_CONFIG);
         }}
       }};
     }}
 
+    // Storefront visitors ONLY pull authoritative config from the server (never overwrite server with visitor localStorage!)
     async function syncStorefrontWithServer() {{
       try {{
         const res = await fetch('/api/store-data?t=' + Date.now(), {{ cache: 'no-store' }});
         const srvCfg = res.ok ? await res.json() : window.__DGPRO_SERVER_STORE_CONFIG__;
         const srvHasProds = srvCfg && Array.isArray(srvCfg.products) && srvCfg.products.length > 0;
-        const srvTs = Number(srvCfg && srvCfg.lastUpdated) || 0;
-
-        const adminLocalProdsRaw = localStorage.getItem('dgpro_products');
-        if (adminLocalProdsRaw) {{
-          let localCfg = null;
-          try {{
-            if (typeof loadFromIndexedDB === 'function') {{
-              localCfg = await loadFromIndexedDB('dgpro_store_config');
-            }}
-          }} catch(e) {{}}
-          if (!localCfg) {{
-            try {{ localCfg = JSON.parse(localStorage.getItem('dgpro_store_config') || 'null'); }} catch(e) {{}}
-          }}
-          const localProds = JSON.parse(adminLocalProdsRaw);
-          const localTs = Number(localCfg && localCfg.lastUpdated) || 1;
-          // Auto-upload any local product videos from Admin browser to server
-          syncAllLocalVideosToServer(localProds, (localCfg && localCfg.productMedia) || (typeof PRODUCT_MEDIA !== 'undefined' ? PRODUCT_MEDIA : {{}}));
-
-          if (!srvHasProds || localTs > srvTs) {{
-            const mergedToPush = {{
-              categories: (localCfg && localCfg.categories) || (typeof CATEGORIES !== 'undefined' ? CATEGORIES : []),
-              products: localProds,
-              productMedia: (localCfg && localCfg.productMedia) || (typeof PRODUCT_MEDIA !== 'undefined' ? PRODUCT_MEDIA : {{}}),
-              orderBumps: (localCfg && localCfg.orderBumps) || (typeof ORDER_BUMPS !== 'undefined' ? ORDER_BUMPS : {{}}),
-              coupons: (localCfg && localCfg.coupons) || (typeof COUPONS !== 'undefined' ? COUPONS : {{}}),
-              siteBanners: (localCfg && localCfg.siteBanners) || (typeof SITE_BANNERS !== 'undefined' ? SITE_BANNERS : {{}}),
-              lastUpdated: localTs > 1 ? localTs : Date.now()
-            }};
-            await window.pushStoreDataToCentralServer(mergedToPush, false);
-            applyAuthoritativeServerConfig(mergedToPush);
-            return;
-          }}
-        }}
-
         if (srvHasProds) {{
           applyAuthoritativeServerConfig(srvCfg);
         }}
       }} catch (err) {{
-        if (window.__DGPRO_SERVER_STORE_CONFIG__ && Array.isArray(window.__DGPRO_SERVER_STORE_CONFIG__.products)) {{
+        if (window.__DGPRO_SERVER_STORE_CONFIG__ && Array.isArray(window.__DGPRO_SERVER_STORE_CONFIG__.products) && window.__DGPRO_SERVER_STORE_CONFIG__.products.length > 0) {{
           applyAuthoritativeServerConfig(window.__DGPRO_SERVER_STORE_CONFIG__);
         }}
       }}
     }}
 
-    if (window.__DGPRO_SERVER_STORE_CONFIG__ && Array.isArray(window.__DGPRO_SERVER_STORE_CONFIG__.products) && window.__DGPRO_SERVER_STORE_CONFIG__.products.length > 0 && !localStorage.getItem('dgpro_products')) {{
+    if (window.__DGPRO_SERVER_STORE_CONFIG__ && Array.isArray(window.__DGPRO_SERVER_STORE_CONFIG__.products) && window.__DGPRO_SERVER_STORE_CONFIG__.products.length > 0) {{
       applyAuthoritativeServerConfig(window.__DGPRO_SERVER_STORE_CONFIG__);
     }}
     syncStorefrontWithServer();
@@ -1297,50 +1352,30 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
 
         # 1B. Public Central Store Data endpoint (Products, Categories, Banners, Coupons, Bumps)
         if path in ('/api/store-data', '/api/products'):
-            try:
-                cfg = json.loads(json.dumps(db.get("storeConfig", {})))
-            except Exception:
-                cfg = {}
-            pm = cfg.get("productMedia")
-            if not isinstance(pm, dict):
-                pm = {}
-            if os.path.isdir(VIDEOS_DIR):
-                for f_name in os.listdir(VIDEOS_DIR):
-                    if f_name.endswith('.mp4'):
-                        safe_pid = f_name[:-4]
-                        if safe_pid:
-                            slots = pm.get(safe_pid)
-                            if not isinstance(slots, list):
-                                slots = [None, None, None, None, None]
-                            while len(slots) < 5:
-                                slots.append(None)
-                            if not isinstance(slots[4], dict):
-                                slots[4] = {"type": "video", "explicitProductId": safe_pid, "title": "Video Demo"}
-                            slots[4]["videoUrl"] = f"/api/video/{safe_pid}"
-                            pm[safe_pid] = slots
-            cfg["productMedia"] = pm
+            cfg = enrich_store_config_with_server_videos(db.get("storeConfig", {}))
             return self.send_json(200, cfg, extra_headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"
             })
 
         # 1C. Instant HTTP-206 Range Video Streaming Endpoint (/api/video/<pid>)
         if path.startswith('/api/video/'):
-            pid = path.replace('/api/video/', '').strip().split('/')[0]
+            pid = urllib.parse.unquote(path.replace('/api/video/', '').strip().split('/')[0])
             safe_pid = "".join(c for c in pid if c.isalnum() or c in ('_', '-'))
             vid_path = os.path.join(VIDEOS_DIR, f"{safe_pid}.mp4")
-            if not os.path.isfile(vid_path):
+            if not os.path.isfile(vid_path) or os.path.getsize(vid_path) == 0:
                 return self.send_json(404, {"error": "No video found on server for this product."})
             try:
                 file_size = os.path.getsize(vid_path)
                 range_header = self.headers.get('Range', '')
                 if range_header and range_header.startswith('bytes='):
-                    byte_range = range_header.replace('bytes=', '').strip().split('-')
+                    byte_range = range_header.replace('bytes=', '').strip().split(',')[0].split('-')
                     start = int(byte_range[0]) if byte_range[0] else 0
-                    end = int(byte_range[1]) if (len(byte_range) > 1 and byte_range[1]) else min(start + 2 * 1024 * 1024 - 1, file_size - 1)
+                    end = int(byte_range[1]) if (len(byte_range) > 1 and byte_range[1]) else min(start + 4 * 1024 * 1024 - 1, file_size - 1)
                     end = min(end, file_size - 1)
                     if start >= file_size or start > end:
                         self.send_response(416)
                         self.send_header('Content-Range', f'bytes */{file_size}')
+                        self.send_cors_headers()
                         self.end_headers()
                         return
                     chunk_len = end - start + 1
@@ -1352,7 +1387,7 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
                     self.send_header('Accept-Ranges', 'bytes')
                     self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
                     self.send_header('Content-Length', str(chunk_len))
-                    self.send_header('Cache-Control', 'public, max-age=86400')
+                    self.send_header('Cache-Control', 'no-cache')
                     self.send_cors_headers()
                     self.end_headers()
                     self.wfile.write(chunk)
@@ -1364,7 +1399,7 @@ class DGPROHandler(http.server.BaseHTTPRequestHandler):
                     self.send_header('Content-Type', 'video/mp4')
                     self.send_header('Accept-Ranges', 'bytes')
                     self.send_header('Content-Length', str(file_size))
-                    self.send_header('Cache-Control', 'public, max-age=86400')
+                    self.send_header('Cache-Control', 'no-cache')
                     self.send_cors_headers()
                     self.end_headers()
                     self.wfile.write(data_bytes)
@@ -1750,6 +1785,8 @@ Support Helpline: support@dgpro.store
                     "type": "video",
                     "explicitProductId": safe_pid,
                     "title": existing_slot4.get("title") or "Official Video Demo",
+                    "fileName": existing_slot4.get("fileName") or f"{safe_pid}.mp4",
+                    "durationFormatted": existing_slot4.get("durationFormatted") or "",
                     "videoUrl": vid_url,
                     "updatedAt": int(time.time() * 1000)
                 }
@@ -1766,6 +1803,27 @@ Support Helpline: support@dgpro.store
             except Exception as e:
                 return self.send_json(500, {"error": str(e)})
 
+        # 0D-2. Product Video Delete API (/api/admin/delete-video?productId=...)
+        if path == '/api/admin/delete-video':
+            qs = urllib.parse.parse_qs(parsed.query)
+            pid = (qs.get('productId', [''])[0] or self.headers.get('X-Product-Id', '')).strip()
+            safe_pid = "".join(c for c in pid if c.isalnum() or c in ('_', '-'))
+            if not safe_pid:
+                return self.send_json(400, {"error": "Missing productId."})
+            try:
+                vid_path = os.path.join(VIDEOS_DIR, f"{safe_pid}.mp4")
+                if os.path.isfile(vid_path):
+                    os.remove(vid_path)
+                if isinstance(db.get("storeConfig"), dict) and isinstance(db["storeConfig"].get("productMedia"), dict):
+                    pm_list = db["storeConfig"]["productMedia"].get(safe_pid)
+                    if isinstance(pm_list, list) and len(pm_list) > 4:
+                        pm_list[4] = None
+                    db["storeConfig"]["lastUpdated"] = int(time.time() * 1000)
+                    save_database()
+                return self.send_json(200, {"success": True, "productId": safe_pid})
+            except Exception as e:
+                return self.send_json(500, {"error": str(e)})
+
         # 0C. Central Store Data Sync API (/api/admin/save-store-data)
         if path in ('/api/admin/save-store-data', '/api/admin/save-products'):
             session_token = extract_session_token(self)
@@ -1773,34 +1831,35 @@ Support Helpline: support@dgpro.store
             sync_hdr = self.headers.get('X-DGPRO-Admin-Sync', '')
             auth_header = self.headers.get('Authorization', '')
             if not (is_authed or sync_hdr == 'true' or 'Bearer' in auth_header or 'admin' in auth_header):
-                # Also allow if payload has valid products array from admin sync
                 pass
             try:
                 data = json.loads(raw_body.decode('utf-8'))
                 old_pm = db.get("storeConfig", {}).get("productMedia", {}) if isinstance(db.get("storeConfig"), dict) else {}
                 new_pm = data.get("productMedia", {}) if isinstance(data.get("productMedia"), dict) else {}
+
+                # Preserve existing video slot[4] even when incoming productMedia[k_pid] has only 4 photo slots or is missing!
                 for k_pid, old_slots in old_pm.items():
-                    if isinstance(old_slots, list) and len(old_slots) > 4 and isinstance(old_slots[4], dict) and old_slots[4].get("videoUrl"):
-                        if k_pid in new_pm and isinstance(new_pm[k_pid], list) and len(new_pm[k_pid]) > 4:
-                            if not isinstance(new_pm[k_pid][4], dict):
-                                new_pm[k_pid][4] = old_slots[4]
-                            elif not new_pm[k_pid][4].get("videoUrl"):
-                                new_pm[k_pid][4]["videoUrl"] = old_slots[4]["videoUrl"]
-                # Also check if videos/<pid>.mp4 exists on disk for any product
-                for p_obj in data.get("products", []):
-                    if isinstance(p_obj, dict) and p_obj.get("id"):
-                        pid_k = p_obj["id"]
-                        safe_k = "".join(c for c in pid_k if c.isalnum() or c in ('_', '-'))
-                        if os.path.isfile(os.path.join(VIDEOS_DIR, f"{safe_k}.mp4")):
-                            if pid_k not in new_pm or not isinstance(new_pm[pid_k], list):
-                                new_pm[pid_k] = [None, None, None, None, None]
-                            while len(new_pm[pid_k]) < 5:
-                                new_pm[pid_k].append(None)
-                            if not isinstance(new_pm[pid_k][4], dict):
-                                new_pm[pid_k][4] = {"type": "video", "explicitProductId": pid_k, "title": "Video Demo"}
-                            if not new_pm[pid_k][4].get("videoUrl"):
-                                new_pm[pid_k][4]["videoUrl"] = f"/api/video/{safe_k}"
+                    if isinstance(old_slots, list) and len(old_slots) > 4 and isinstance(old_slots[4], dict):
+                        old_vurl = str(old_slots[4].get("videoUrl") or "").strip()
+                        if old_vurl and not old_vurl.startswith("blob:") and not old_vurl.startswith("data:"):
+                            if k_pid not in new_pm or not isinstance(new_pm[k_pid], list):
+                                new_pm[k_pid] = list(old_slots)
+                            else:
+                                while len(new_pm[k_pid]) < 5:
+                                    new_pm[k_pid].append(None)
+                                if not isinstance(new_pm[k_pid][4], dict):
+                                    new_pm[k_pid][4] = dict(old_slots[4])
+                                else:
+                                    inc_vurl = str(new_pm[k_pid][4].get("videoUrl") or "").strip()
+                                    if not inc_vurl or inc_vurl.startswith("blob:") or inc_vurl.startswith("data:"):
+                                        new_pm[k_pid][4]["videoUrl"] = old_vurl
+                                    if not new_pm[k_pid][4].get("fileName") and old_slots[4].get("fileName"):
+                                        new_pm[k_pid][4]["fileName"] = old_slots[4]["fileName"]
+                                    if not new_pm[k_pid][4].get("durationFormatted") and old_slots[4].get("durationFormatted"):
+                                        new_pm[k_pid][4]["durationFormatted"] = old_slots[4]["durationFormatted"]
+
                 data["productMedia"] = new_pm
+                data = enrich_store_config_with_server_videos(data)
                 db["storeConfig"] = data
                 save_database()
                 print("====================================================")
@@ -2240,9 +2299,12 @@ Support Helpline: support@dgpro.store
 
             return self.send_json(200, {"status": "ok"})
 
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
 def run():
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), DGPROHandler) as httpd:
+    with ThreadingHTTPServer(("", PORT), DGPROHandler) as httpd:
         print(f"====================================================")
         print(f"🚀 DGPRO Razorpay Backend Server running on http://localhost:{PORT}")
         print(f"🛡️ HMAC-SHA256 Webhook Endpoint: http://localhost:{PORT}/api/webhook/razorpay")
